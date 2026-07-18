@@ -32,6 +32,7 @@ import java.util.UUID;
 
 /**
  * 文件存储服务
+ * 文件上传到 S3（MinIO/RustFS）
  */
 @Slf4j
 @Service

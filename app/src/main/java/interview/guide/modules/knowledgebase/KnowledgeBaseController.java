@@ -149,6 +149,7 @@ public class KnowledgeBaseController {
     /**
      * 上传知识库文件
      */
+//    consumes 约束输入格式，produces 约束输出格式。两者独立，互不影响。
     @PostMapping(value = "/api/knowledgebase/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     @RateLimit(dimension = RateLimit.Dimension.GLOBAL, count = 3)
     @RateLimit(dimension = RateLimit.Dimension.IP, count = 3)

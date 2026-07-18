@@ -14,6 +14,8 @@ import java.security.NoSuchAlgorithmException;
 /**
  * 文件哈希服务
  * 统一提供文件哈希计算功能，用于文件去重
+ *
+ * 计算文件哈希，检测重复上传
  */
 @Slf4j
 @Service

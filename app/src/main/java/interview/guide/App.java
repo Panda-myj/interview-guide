@@ -14,7 +14,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
  * AI Interview Platform - Main Application
  * 智能AI面试官平台 - 主启动类
  */
-@EnableScheduling
+@EnableScheduling //开启定时任务
 @SpringBootApplication(exclude = {
     OpenAiAudioSpeechAutoConfiguration.class,
     OpenAiAudioTranscriptionAutoConfiguration.class,
@@ -22,7 +22,8 @@ import org.springframework.scheduling.annotation.EnableScheduling;
     OpenAiEmbeddingAutoConfiguration.class,
     OpenAiImageAutoConfiguration.class,
     OpenAiModerationAutoConfiguration.class
-})
+})//spring boot主程序
+//LlmProviderRegistry 和 StructuredOutputInvoker 是 Agent 项目的灵魂。
 public class App {
 
     public static void main(String[] args) {

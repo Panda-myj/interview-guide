@@ -15,6 +15,8 @@ import java.util.function.Function;
  * 使用MapStruct自动生成转换代码
  * <p>
  * 注意：JSON字段需要在Service层手动处理
+ *
+ * MapStruct 对象转换（Entity ↔ DTO）
  */
 @Mapper(componentModel = "spring", unmappedTargetPolicy = ReportingPolicy.IGNORE)
 public interface InterviewMapper {

@@ -44,8 +44,8 @@ services:
       RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-rustfsadmin}
       RUSTFS_CONSOLE_ENABLE: "true"
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "9000:9000"# API端口
+      - "9001:9001"# 控制台端口
     volumes:
       - rustfs_data:/data
     healthcheck:

@@ -19,10 +19,13 @@ import java.util.stream.Collectors;
 
 /**
  * 全局异常处理器
+ *
+ * 全局异常处理器，所有异常统一返回 Result
+ * ⭐⭐ Spring 全局异常处理标准写法
  */
 @RestControllerAdvice
 public class GlobalExceptionHandler {
-    
+    // final是一个关键字，用于修饰变量、方法和类，表示不可变性或最终性
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
     
     /**

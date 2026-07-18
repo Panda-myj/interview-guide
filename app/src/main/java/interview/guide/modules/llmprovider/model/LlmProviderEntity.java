@@ -51,7 +51,7 @@ public class LlmProviderEntity {
   private boolean enabled;
 
   @Column(nullable = false)
-  private boolean builtin;
+  private boolean builtin;//是否内置服务商
 
   @Column(name = "created_at", nullable = false)
   private LocalDateTime createdAt;

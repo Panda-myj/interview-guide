@@ -19,6 +19,7 @@ public class WebSocketConfig implements WebSocketConfigurer {
     private final VoiceInterviewWebSocketHandler voiceInterviewWebSocketHandler;
     private final CorsProperties corsProperties;
 
+    //WebSocket 端点为 /ws/voice-interview/{sessionId}，前端通过 JavaScript new WebSocket("ws://localhost:8080/ws/voice-interview/123") 连接。
     @Override
     public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
         registry.addHandler(voiceInterviewWebSocketHandler, "/ws/voice-interview/{sessionId}")

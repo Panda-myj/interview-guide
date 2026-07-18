@@ -30,7 +30,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.List;
 
 /**
- * PDF导出服务
+ * PDF导出服务	用 iText 8 生成 PDF 报告
  * PDF Export Service for resume analysis and interview reports
  */
 @Slf4j

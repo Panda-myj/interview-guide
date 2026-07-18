@@ -13,6 +13,8 @@ import software.amazon.awssdk.services.s3.S3Client;
 
 /**
  * S3客户端配置（用于RustFS）
+ * 跨域、JSON 序列化、S3 存储等配置
+ * 属于 Spring Boot 配置类写法
  */
 @Configuration
 @RequiredArgsConstructor

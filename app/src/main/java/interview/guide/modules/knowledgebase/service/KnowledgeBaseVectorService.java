@@ -93,7 +93,7 @@ public class KnowledgeBaseVectorService {
                 log.debug("处理第 {}/{} 批: chunks {}-{}", i + 1, batchCount, start + 1, end);
                 vectorStore.add(batch);
             }
-            activateVectorJob(knowledgeBaseId, jobId);
+            activateVectorJob(knowledgeBaseId, jobId);//⭐
             log.info("知识库向量化完成: kbId={}, jobId={}, chunks={}, batches={}",
                     knowledgeBaseId, jobId, totalChunks, batchCount);
         } catch (Exception e) {

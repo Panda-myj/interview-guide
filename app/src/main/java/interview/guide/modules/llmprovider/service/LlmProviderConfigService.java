@@ -137,10 +137,13 @@ public class LlmProviderConfigService {
   }
 
   // ===== Read operations (read lock) =====
-
+// LlmProviderConfigService.listProviders()               │
+//         │  职责：加读锁 → 查 Repository → Entity 转 DTO → 脱敏    │
+//            │  @Service  rwLock.readLock()  providerRepository.findAll()
   public List<ProviderDTO> listProviders() {
-    rwLock.readLock().lock();
+    rwLock.readLock().lock();//可重入读写锁
     try {
+//        YAML 模式分支
       if (!isDatabaseBacked()) {
         Map<String, ProviderConfig> providers = properties.getProviders();
         if (providers == null) return List.of();
@@ -148,7 +151,7 @@ public class LlmProviderConfigService {
             .map(e -> ProviderDTO.builder()
                 .id(e.getKey())
                 .baseUrl(e.getValue().getBaseUrl())
-                .maskedApiKey(maskApiKey(e.getValue().getApiKey()))
+                .maskedApiKey(maskApiKey(e.getValue().getApiKey()))//两步处理敏感数据：先从数据库密文解密出真实 API Key，再把 sk-abc123def456 变成 sk-***456 返回。这样即使前端被 XSS 攻击，拿到的也是脱敏后的 Key。
                 .model(e.getValue().getModel())
                 .embeddingModel(e.getValue().getEmbeddingModel())
                 .embeddingDimensions(resolveEmbeddingDimensions(e.getValue().getEmbeddingDimensions()))
@@ -157,15 +160,16 @@ public class LlmProviderConfigService {
                 .temperature(e.getValue().getTemperature())
                 .defaultChatProvider(e.getKey().equals(properties.getDefaultProvider()))
                 .defaultEmbeddingProvider(e.getKey().equals(properties.getDefaultEmbeddingProvider()))
-                .build())
+                .build())//构建出不可变的 ProviderDTO record
             .toList();
       }
+//      数据库模式
       LlmGlobalSettingEntity setting = getGlobalSettingOrThrow();
       return providerRepository.findAll().stream()
           .map(provider -> ProviderDTO.builder()
               .id(provider.getId())
               .baseUrl(provider.getBaseUrl())
-              .maskedApiKey(maskApiKey(decryptApiKey(provider)))
+              .maskedApiKey(maskApiKey(decryptApiKey(provider)))//两步处理敏感数据：先从数据库密文解密出真实 API Key，再把 sk-abc123def456 变成 sk-***456 返回。这样即使前端被 XSS 攻击，拿到的也是脱敏后的 Key。
               .model(provider.getModel())
               .embeddingModel(provider.getEmbeddingModel())
               .embeddingDimensions(resolveEmbeddingDimensions(provider.getEmbeddingDimensions()))
@@ -173,10 +177,11 @@ public class LlmProviderConfigService {
               .temperature(provider.getTemperature())
               .defaultChatProvider(provider.getId().equals(setting.getDefaultChatProviderId()))
               .defaultEmbeddingProvider(provider.getId().equals(setting.getDefaultEmbeddingProviderId()))
-              .build())
+              .build())//构建出不可变的 ProviderDTO record
           .toList();
     } finally {
-      rwLock.readLock().unlock();
+      rwLock.readLock().unlock();//        放在 finally 块里一定会执行，即使中间抛了异常也不会死锁。
+
     }
   }
 
@@ -317,30 +322,42 @@ public class LlmProviderConfigService {
 
   // ===== Write operations (write lock) =====
 
-  @Transactional
+  @Transactional//事务注解只放 Service 层，Controller 和 Repository 不关心事务。
   public void createProvider(CreateProviderRequest request) {
+      /*
+        // 读操作（listProviders）
+        rwLock.readLock().lock();    // 共享锁：10 个人同时读，互不阻塞
+        // 写操作（createProvider）
+        rwLock.writeLock().lock();   // 排他锁：写的时候，其他人既不能读也不能写*/
     rwLock.writeLock().lock();
     try {
       if (!isDatabaseBacked()) {
         createProviderLegacy(request);
         return;
       }
-      String providerId = trimOrNull(request.id());
+        // ===== 分支 1：查重 =====
+      String providerId = trimOrNull(request.id());//主键查询
       if (providerRepository.existsById(providerId)) {
         throw new BusinessException(ErrorCode.PROVIDER_ALREADY_EXISTS,
             "Provider '" + request.id() + "' 已存在");
       }
+        // ===== 分支 2：必填校验 =====
       String baseUrl = requireNonBlank(request.baseUrl(), "baseUrl");
+      /*为什么 Controller 里已经 @NotBlank 了，Service 还要再校验一次？
+        @Valid 只能保护 Controller 入参。如果将来有其他代码（定时任务、消息队列消费者、内部调用）绕过 Controller 直接调用 Service，这层防御就是最后一道防线。这叫防御性编程——每一层都不信任上一层的数据。
+      */
       String model = requireNonBlank(request.model(), "model");
       String apiKey = requireNonBlank(request.apiKey(), "apiKey");
       String embeddingModel = trimOrNull(request.embeddingModel());
       Integer embeddingDimensions = resolveEmbeddingDimensions(request.embeddingDimensions());
+        // ===== 分支 3：Embedding 配置校验 =====
       boolean supportsEmbedding = request.supportsEmbedding() != null
           ? request.supportsEmbedding()
           : embeddingModel != null;
       validateEmbeddingConfig(providerId, supportsEmbedding, embeddingModel, embeddingDimensions);
-
+      // ===== 分支 4：加密 API Key =====
       ApiKeyEncryptionService.EncryptedValue encrypted = encryptionService.encrypt(apiKey);
+        // ===== 分支 5：持久化 =====
       providerRepository.save(LlmProviderEntity.builder()
           .id(providerId)
           .baseUrl(baseUrl)
@@ -354,10 +371,14 @@ public class LlmProviderConfigService {
           .enabled(true)
           .builtin(false)
           .build());
-      registry.reload();
+      // ===== 分支 6：刷新内存注册表 =====
+      registry.reload(); //(registry.reload() 不在事务内
+//        为什么这行放在事务外面？ 因为 registry.reload() 可能涉及网络调用或者类加载，跟数据库事务无关。
+//        项目规则明确规定："事务内不得调用 LLM、S3、外部 HTTP"。如果 reload() 失败抛异常，数据库的写入也不应该回滚——数据已经正确落库了，registry 刷新失败是另一个独立问题。
       log.info("Created provider: id={}, baseUrl={}, model={}", providerId, baseUrl, model);
     } finally {
-      rwLock.writeLock().unlock();
+      rwLock.writeLock().unlock();// 无论成功还是异常，都会执行
+//      为什么必须 finally？ 如果 save() 抛异常，代码跳到 catch（或直接向上抛），如果没有 finally，写锁永远不会释放 → 死锁 → 整个应用的 Provider 相关接口全部挂掉。
     }
   }
 

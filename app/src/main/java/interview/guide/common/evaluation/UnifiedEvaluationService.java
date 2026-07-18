@@ -34,12 +34,15 @@ public class UnifiedEvaluationService {
     private static final Logger log = LoggerFactory.getLogger(UnifiedEvaluationService.class);
     private static final int MAX_REFERENCE_CONTEXT_CHARS = 6000;
 
+    //动态模板渲染：使用 PromptTemplate 加载外部 .txt 文件（而非硬编码），提示词与代码解耦，便于 A/B 测试调优。
     private final PromptTemplate systemPromptTemplate;
     private final PromptTemplate userPromptTemplate;
+    //结构化输出强制：通过 BeanOutputConverter<BatchReportDTO> 生成 JSON Schema 并拼入 System Prompt，确保 LLM 返回严格符合 Java Bean 的 JSON，省去繁琐的正则解析。
     private final BeanOutputConverter<BatchReportDTO> outputConverter;
     private final PromptTemplate summarySystemPromptTemplate;
     private final PromptTemplate summaryUserPromptTemplate;
     private final BeanOutputConverter<SummaryDTO> summaryOutputConverter;
+    //重试与降级：StructuredOutputInvoker 封装了异常捕获，单批失败返回 null 而非抛异常，后续用“0分+占位语”兜底，保证整个面试流程不中断。
     private final StructuredOutputInvoker structuredOutputInvoker;
     private final int evaluationBatchSize;
     private final ResourceLoader resourceLoader;
@@ -97,6 +100,7 @@ public class UnifiedEvaluationService {
      * @param resumeText  简历摘要（可选，可为 null）
      * @return 评估报告
      */
+    //方法重载，实现向后兼容的默认参数
     public EvaluationReport evaluate(ChatClient chatClient,
                                      String sessionId,
                                      List<QaRecord> qaRecords,
@@ -161,6 +165,7 @@ public class UnifiedEvaluationService {
         return results;
     }
 
+    //ai核心调用
     private BatchReportDTO evaluateBatch(ChatClient chatClient, String sessionId,
                                           String resumeContext, String referenceContext,
                                           List<QaRecord> batch) {
@@ -287,6 +292,7 @@ public class UnifiedEvaluationService {
             .map(String::trim).distinct().limit(8).toList();
     }
 
+    //结果聚合
     private EvaluationReport buildReport(String sessionId, List<QaRecord> qaRecords,
                                           List<QuestionEvalDTO> evaluations,
                                           String overallFeedback,

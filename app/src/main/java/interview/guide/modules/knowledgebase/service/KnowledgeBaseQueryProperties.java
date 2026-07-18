@@ -30,7 +30,7 @@ public class KnowledgeBaseQueryProperties {
         private double minScoreShort = 0.25;
         private double minScoreDefault = 0.28;
     }
-
+（
     @Data
     public static class History {
         private boolean enabled = true;

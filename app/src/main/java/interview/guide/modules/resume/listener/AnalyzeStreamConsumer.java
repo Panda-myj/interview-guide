@@ -15,6 +15,25 @@ import org.springframework.stereotype.Component;
 
 import java.util.Map;
 
+/*生产者
+
+AnalyzeStreamProducer.java
+
+把任务包装成消息，推入 Redis Stream
+
+消费者
+
+AnalyzeStreamConsumer.java
+
+从 Stream 拉取消息，执行真正的 AI 分析
+
+编排者
+
+ResumeUploadService.java
+
+串联上传→入库→发消息，协调同步与异步边界
+*/
+
 /**
  * 简历分析 Stream 消费者
  * 负责从 Redis Stream 消费消息并执行 AI 分析

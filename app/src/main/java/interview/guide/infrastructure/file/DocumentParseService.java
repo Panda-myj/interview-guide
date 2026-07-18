@@ -23,6 +23,8 @@ import java.io.InputStream;
  * 通用文档解析服务
  * 使用 Apache Tika 解析多种文档格式，提取文本内容
  * 供知识库和简历模块共同使用
+ *
+ * 用 Apache Tika 解析 PDF/DOCX/MD 文件内容
  */
 @Slf4j
 @Service

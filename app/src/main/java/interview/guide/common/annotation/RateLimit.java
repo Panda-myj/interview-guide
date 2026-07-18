@@ -9,6 +9,8 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 /**
+ * 可重复的限流注解	Java 注解进阶用法
+ *
  * 限流注解
  * 用于方法级别的限流控制，支持可重复注解实现多维度独立限流
  * <p>
@@ -24,8 +26,24 @@ import java.lang.annotation.Target;
  *
  * @see RateLimitAspect
  */
+
+/*可重复注解的两个特征
+// ✅ 特征1：被 @Repeatable 元注解修饰，指向容器注解
+@Repeatable(RateLimit.Container.class)
+public @interface RateLimit {
+    // ... 属性定义
+}
+// ✅ 特征2：存在一个嵌套的容器注解（Container）
+public @interface Container {
+    RateLimit[] value(); // 必须是数组类型
+}*/
+
+
+//@Target(METHOD) 确保只能用在方法上；
 @Target(ElementType.METHOD)
+// @Retention(RUNTIME) 确保运行时通过反射能读到。
 @Retention(RetentionPolicy.RUNTIME)
+//这是实现多条规则并存的基石。Java 不允许同一个位置出现两个相同的注解，因此必须借助 Container 容器。
 @Repeatable(RateLimit.Container.class)
 public @interface RateLimit {
 

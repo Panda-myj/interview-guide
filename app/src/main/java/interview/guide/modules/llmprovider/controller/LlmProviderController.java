@@ -26,13 +26,17 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
 
-@RestController
-@RequestMapping("/api/llm-provider")
-@RequiredArgsConstructor
-@Slf4j
+@RestController//组合注解 = @Controller + @ResponseBody。标记为 REST 控制器，所有方法返回值自动序列化为 JSON（而非视图名）
+@RequestMapping("/api/llm-provider")//定义该控制器下所有接口的基础路径前缀。例如 listProviders 的完整路径是 /api/llm-provider/list。
+@RequiredArgsConstructor//Lombok 注解。自动生成包含所有 final 字段的构造函数。配合 Spring 实现构造器注入（推荐的依赖注入方式，优于 @Autowired 字段注入）。
+@Slf4j//Lombok 注解。自动生成 private static final Logger log = LoggerFactory.getLogger(...) 日志对象。
 public class LlmProviderController {
 
   private final LlmProviderConfigService configService;
+    /*
+    声明一个 final 的服务层依赖。
+    由于 @RequiredArgsConstructor，Lombok 会生成 LlmProviderController(LlmProviderConfigService configService) 构造函数。
+    Spring 容器启动时会自动创建 LlmProviderConfigService 的实现类实例，并通过构造函数注入到这里。这就是 IoC 的核心体现。*/
 
   @GetMapping("/list")
   @RateLimit(dimension = RateLimit.Dimension.GLOBAL, count = 30)
@@ -46,6 +50,8 @@ public class LlmProviderController {
     return Result.success(configService.getProvider(id));
   }
 
+//@RequestBody: 将 HTTP 请求体（JSON）反序列化为 CreateProviderRequest 对象。
+//@Valid: 触发 Bean Validation。如果 DTO 上的 @NotBlank, @Size 等校验失败，Spring 会自动抛出 MethodArgumentNotValidException（通常由全局异常处理器捕获并返回 400 错误）。
   @PostMapping
   @RateLimit(dimension = RateLimit.Dimension.GLOBAL, count = 5)
   public Result<Void> createProvider(@RequestBody @Valid CreateProviderRequest request) {
@@ -101,7 +107,7 @@ public class LlmProviderController {
     return Result.success();
   }
 
-  // ===== Voice ASR/TTS Config =====
+  // ===== Voice ASR/TTS Config ===== asr,tts是语音文本转换模型
 
   @GetMapping("/voice/asr")
   @RateLimit(dimension = RateLimit.Dimension.GLOBAL, count = 30)

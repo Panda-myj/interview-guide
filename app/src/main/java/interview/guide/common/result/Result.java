@@ -6,6 +6,9 @@ import lombok.Getter;
 
 /**
  * 统一响应结果
+ *
+ * 统一响应体 Result<T>，{code, message, data}
+ * ⭐ 前后端分离标准实践
  */
 @Getter
 public class Result<T> {
