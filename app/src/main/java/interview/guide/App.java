@@ -25,7 +25,6 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 })//spring boot主程序
 //LlmProviderRegistry 和 StructuredOutputInvoker 是 Agent 项目的灵魂。
 public class App {
-
     public static void main(String[] args) {
         SpringApplication.run(App.class, args);
     }

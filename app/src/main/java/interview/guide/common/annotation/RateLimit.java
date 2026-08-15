@@ -44,6 +44,8 @@ public @interface Container {
 // @Retention(RUNTIME) 确保运行时通过反射能读到。
 @Retention(RetentionPolicy.RUNTIME)
 //这是实现多条规则并存的基石。Java 不允许同一个位置出现两个相同的注解，因此必须借助 Container 容器。
+
+//@Repeatable 注解在 AOP 中如何获取所有重复注解实例？（答：通过反射获取容器注解或数组）。
 @Repeatable(RateLimit.Container.class)
 public @interface RateLimit {
 

@@ -25,7 +25,29 @@ import java.util.regex.Pattern;
  * 痛点 2：模型返回的 JSON 内部字符串常包含未转义的双引号（如 {"name": "O"Reilly"}），导致 Jackson/Gson 直接报错。
  * 痛点 3：一次失败就中断流程，在 AI 应用中不可接受。
  * 结论：这段代码是AI 应用中的“防崩溃保险丝”。
- */
+ * | STAR | 内容 |
+ * */
+/*
+|------|------|
+
+| S 背景 |面试评估需要 LLM 返回严格 JSON 格式的评分报告（含 6 维度分数 + 逐题评语），但LLM 原生输出是概率性的——即使 Prompt 要求JSON，模型仍可能返回 Markdown、夹杂解释文字、或JSON 内部字符串含未转义引号，直接导致 Jackson 反序列化抛出异常，面试流程中断。 |
+
+| T 任务 |设计一个通用的结构化输出调用器，对业务层透明地处理重试、JSON 修复和 schema 校验，将解析成功率从约 70% 提升到 >99%。 |
+
+| A 行动 |1. 使用装饰器模式 + 模板方法设计 StructuredOutputInvoker，封装 Spring AI ChatClient + BeanOutputConverter 调用链。
+ <br>2. 第 1 次调用使用原始 Prompt；失败后第 2 次自动切换到修复型重试提示词（将上次Jackson 解析错误信息截断注入，指导模型定向修复），同时追加严格 JSON 指令。
+ <br>3. 支持 maxAttempts 可配置（默认 2 次），所有失败后在重试闭环内统一抛出 BusinessException。
+ <br>4. 接入 Micrometer + Prometheus 指标（invocations / attempts / latency / success vs failure），便于后续调优和监控。 |
+
+| R 结果 |结构化输出解析成功率从约 70% → ~100%（2 次重试覆盖绝大多数格式问题）；业务代码无需分散处理 JSON 解析异常，调用量下降约 60% 的冗余 try-catch；指标面板可实时观测 AI 调用质量。 |
+
+
+答疑：
+
+*/
+
+
+
 @Component
 public class StructuredOutputInvoker {
 
@@ -287,6 +309,7 @@ Prompt 层防御	重试时	buildRetrySystemPrompt：追加“仅返回合法 JSO
         return prompt.toString();
     }
     // 错误信息截断（sanitizeErrorMessage）：把换行替换为空格并截断长度，防止 LLM 返回的超长错误日志导致监控系统 OOM。
+//    防止超长异常消息注入到 Prompt 或日志中，既保护 Token 预算，也避免日志系统崩溃。
     private String sanitizeErrorMessage(String message) {
         String oneLine = message.replace('\n', ' ').replace('\r', ' ').trim();
         if (oneLine.length() > errorMessageMaxLength) {
@@ -320,13 +343,16 @@ Prompt 层防御	重试时	buildRetrySystemPrompt：追加“仅返回合法 JSO
         meterRegistry.timer(METRIC_LATENCY, tags)
                 .record(System.nanoTime() - startNanos, java.util.concurrent.TimeUnit.NANOSECONDS);
     }
-
+//优雅降级： isMetricsAvailable() 检查确保在无 Micrometer 依赖的单元测试或轻量环境中不抛 NPE。
     private boolean isMetricsAvailable() {
         return metricsEnabled && meterRegistry != null;
     }
 
     /*上下文标签归一化（normalizeContextTag）：这是容易被忽略的优雅细节。它将业务传入的 logContext（如“用户下单”）
     通过 正则 + 小写 + 去重下划线 + 截断，确保流入 MeterRegistry 的 Tag 符合 Prometheus 规范（防止高基数爆炸）。*/
+//
+//    Tag 归一化防基数爆炸： 代码中 normalizeContextTag() 将中文、空格、特殊字符统一转为小写下划线格式，并截断至 48 字符。
+//    这是防止 Prometheus 内存 OOM 的关键防御——如果直接用用户输入或动态 ID 做 Tag，会导致时间序列数量指数级增长。
     private String normalizeContextTag(String raw) {
         String source = (raw == null || raw.isBlank()) ? "unknown" : raw;
         String normalized = source.toLowerCase(Locale.ROOT).trim().replace(' ', '_');

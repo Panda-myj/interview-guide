@@ -268,7 +268,7 @@ public class QwenAsrService {
             // Store session in map BEFORE connecting to ensure hasActiveSession() returns true
             sessions.put(sessionId, asrSession);
 
-            // Connect to server asynchronously (non-blocking)
+            // Connect to server asynchronously (non-blocking) 虚拟线程
             Thread connectionThread = new Thread(() -> {
                 try {
                     conversation.connect();

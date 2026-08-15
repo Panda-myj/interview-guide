@@ -341,7 +341,7 @@ docker compose -f docker-compose.dev.yml down -v
 
 ```bash
 ./gradlew :app:bootRun   这个会oom
-./gradlew :app:bootRun -Dorg.gradle.jvmargs="-Xmx4g -Xms512m -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=./heapdump.hprof"
+./gradlew :app:bootRun -Dorg.gradle.jvmargs="-Xmx4g -Xms4g -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=./heapdump.hprof"
 ```
 
 后端服务启动于 `http://localhost:8080`

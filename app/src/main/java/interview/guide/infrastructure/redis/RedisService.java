@@ -348,12 +348,17 @@ public class RedisService {
             String consumerName,
             int count,
             long pendingIdleTimeoutMs) {
-        if (pendingIdleTimeoutMs <= 0) {
+        if (pendingIdleTimeoutMs <= 0) {//超时时间不合法
             return Map.of();
         }
 
         String cursorKey = streamKey + ":" + groupName;
         StreamMessageId startId = streamReclaimCursors.getOrDefault(cursorKey, StreamMessageId.MIN);
+
+        /*支持分批扫描
+        streamReclaimCursors 是一个缓存（如 Map<String, StreamMessageId>），记录每个 Stream+Group 上次扫描到的位置。
+StreamMessageId.MIN 表示从 Pending 列表的最开始扫描。
+为什么要游标？ 因为 Redis 的 XAUTOCLAIM 一次可能扫不完所有 Pending 消息，返回的 nextId 告诉下次从哪继续。*/
         AutoClaimResult<String, String> result = stream.autoClaim(
             groupName,
             consumerName,
@@ -362,6 +367,14 @@ public class RedisService {
             startId,
             count
         );
+/*这对应 Redis 命令：
+bash
+XAUTOCLAIM streamKey groupName consumerName min-idle-time startId COUNT count
+作用：从 startId 开始扫描 Pending 列表，找到 idle 时间超过 pendingIdleTimeoutMs 的消息，把它们：
+重新分配给 consumerName（修改消息所属消费者）
+返回消息内容
+典型场景：消费者 A 读取了消息但宕机了，消息在 Pending 列表里躺了 5 分钟。消费者 B 调用此方法，把这条"孤儿消息"认领过来自己处理。
+*/
 
         StreamMessageId nextId = result.getNextId();
         if (nextId == null || StreamMessageId.MIN.equals(nextId)) {
@@ -369,19 +382,26 @@ public class RedisService {
         } else {
             streamReclaimCursors.put(cursorKey, nextId);
         }
+/*nextId 是本次扫描的结束位置，下次从这里继续。
+如果为 null 或回到 MIN，说明已经扫完一圈，清除游标。
+*/
 
+//        某些 Pending 消息可能在被认领前，因为 Stream 的长度限制（MAXLEN）或手动删除而消失了。XAUTOCLAIM 会返回这些已删除消息的 ID，这里打 WARN 日志提示数据丢失。
         List<StreamMessageId> deletedIds = result.getDeletedIds();
         if (deletedIds != null && !deletedIds.isEmpty()) {
             log.warn("Stream pending messages were trimmed before reclaim: stream={}, group={}, ids={}",
                 streamKey, groupName, deletedIds);
         }
 
+        //返回认领到的消息
         Map<StreamMessageId, Map<String, String>> messages = result.getMessages();
         if (messages != null && !messages.isEmpty()) {
             log.info("Reclaimed Redis Stream pending messages: stream={}, group={}, consumer={}, count={}",
                 streamKey, groupName, consumerName, messages.size());
         }
         return messages == null ? Map.of() : messages;
+        /*返回的是 Map<消息ID, 消息体>。
+如果本次没有符合条件的消息，返回空 Map。*/
     }
 
     private boolean processMessages(

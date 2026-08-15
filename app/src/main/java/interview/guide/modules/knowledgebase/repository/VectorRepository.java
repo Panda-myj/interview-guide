@@ -83,6 +83,8 @@ public class VectorRepository {
     /**
      * 将临时向量任务提升为当前知识库的正式向量数据。
      */
+    /*原子元数据提升（VectorRepository.promoteVectorJob()）：
+    向量化时先用临时 kb_id（pending:{ID}:{UUID}）写入，全部成功后用一条 SQL jsonb_set 原子替换。这样即使向量化中途崩溃，已写入的临时向量不会污染检索结果，重启后清理也简单。*/
     public int promoteVectorJob(Long knowledgeBaseId, String jobId) {
         String sql = """
             UPDATE vector_store

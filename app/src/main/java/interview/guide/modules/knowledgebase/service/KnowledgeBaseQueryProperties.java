@@ -30,7 +30,10 @@ public class KnowledgeBaseQueryProperties {
         private double minScoreShort = 0.25;
         private double minScoreDefault = 0.28;
     }
-（
+    /*查询长度（去空白）	TopK	minScore	策略意图
+≤ 4 字（短查询）	20	0.18	口语化短查询歧义大，放宽阈值多召回，靠 LLM 自行筛选
+5-12 字（中查询）	12	0.28	中等长度，平衡召回率和精准度
+> 12 字（长查询）	8	0.28	查询已足够具体，收窄 TopK 减少噪声*/
     @Data
     public static class History {
         private boolean enabled = true;

@@ -28,7 +28,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 //AbstractStreamConsumer<T>：
 //负责从指定 Stream 的消费组中拉取消息，解析为 T，执行业务逻辑，并管理重试、完成/失败状态及最终确认。
-//两者都依赖 RedisService（封装了 Redisson 或 Lettuce 的 Stream 操作）。
+//两者都依赖 RedisService（封装了 Redisson 的 Stream 操作）。
 @Slf4j
 public abstract class AbstractStreamConsumer<T> {
 
@@ -50,7 +50,7 @@ public abstract class AbstractStreamConsumer<T> {
     @PostConstruct
     public void init() {
         this.consumerName = consumerPrefix() + UUID.randomUUID().toString().substring(0, 8);    //用于 消费组内 区分实例
-        this.executorService = new ThreadPoolExecutor(//创建单线程的守护线程池（保证只有一个消费线程，简化并发控制）。
+        this.executorService = new ThreadPoolExecutor(
                 1,                          // corePoolSize: 核心线程数为1，保证始终只有一个工作线程在处理任务
                 1,                          // maximumPoolSize: 最大线程数也为1，确保线程池永远不会创建第二个线程（严格单线程消费）
                 0L,                         // keepAliveTime: 空闲线程存活时间为0（因core=max=1，此参数实际不生效）
@@ -160,7 +160,7 @@ public abstract class AbstractStreamConsumer<T> {
 
     消息确认总是在处理完成后（成功/失败/跳过），不依赖外部 ACK，防止 Pending 队列积压。
 
-    重试机制由业务层自行实现（重新调用 producer 或直接设置新消息），基类只传递重试次数。
+    重试机制由业务层自行实现（如重新入队），基类只传递重试次数。
 
     所有抽象方法提供了业务介入点，形成完整的“处理模板”。*/
     private void processMessage(StreamMessageId messageId, Map<String, String> data) {

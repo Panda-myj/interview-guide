@@ -383,58 +383,107 @@ public class KnowledgeBaseQueryService {
             || text.contains("无法根据提供内容回答");
     }
 
-    /**
+    /*
      * 先观察前一小段流式内容，快速识别“无信息”模板。
      * - 命中无信息：立即输出固定模板并结束，防止长篇拒答
      * - 非无信息：尽快释放缓冲并继续实时透传
      */
+    /**
+     * 规范化流输出：在完全接收流数据之前，提前探测是否为"无结果"响应，
+     * 如果是则截断流并返回固定响应；否则将流原样透传。
+     *
+     * @param rawFlux 原始的字符串 Flux 流
+     * @return 经过探测和规范化处理后的 Flux 流
+     */
     private Flux<String> normalizeStreamOutput(Flux<String> rawFlux) {
+        // 使用 Flux.create 创建自定义的 Flux，允许手动控制数据的发射和完成
         return Flux.create(sink -> {
+
+            // 缓冲区：用于累积尚未进入透传模式的字符片段，供探测逻辑分析
             StringBuilder probeBuffer = new StringBuilder();
+
+            // 标记位：是否已经确认不是"无结果"，进入透传模式
             AtomicBoolean passthrough = new AtomicBoolean(false);
+
+            // 标记位：是否已经完成（探测到无结果并已处理完毕）
             AtomicBoolean completed = new AtomicBoolean(false);
+
+            // 持有 disposable 引用的数组，方便在 onCancel 中释放订阅
             final Disposable[] disposableRef = new Disposable[1];
 
+            // 订阅原始流 rawFlux
             disposableRef[0] = rawFlux.subscribe(
-                chunk -> {
-                    if (completed.get() || sink.isCancelled()) {
-                        return;
-                    }
-                    if (passthrough.get()) {
-                        sink.next(chunk);
-                        return;
-                    }
 
-                    probeBuffer.append(chunk);
-                    String probeText = probeBuffer.toString();
-                    if (isNoResultLike(probeText)) {
-                        completed.set(true);
-                        sink.next(NO_RESULT_RESPONSE);
-                        sink.complete();
-                        if (disposableRef[0] != null) {
-                            disposableRef[0].dispose();
+                    // --- onNext：每收到一个数据块时的回调 ---
+                    chunk -> {
+                        // 如果已经完成或 sink 已被取消，忽略此数据块
+                        if (completed.get() || sink.isCancelled()) {
+                            return;
                         }
-                        return;
-                    }
 
-                    if (probeBuffer.length() >= STREAM_PROBE_CHARS) {
-                        passthrough.set(true);
-                        sink.next(probeText);
-                        probeBuffer.setLength(0);
+                        // 如果已进入透传模式，直接将数据块转发给下游
+                        if (passthrough.get()) {
+                            sink.next(chunk);
+                            return;
+                        }
+
+                        // 否则，将数据块追加到探测缓冲区中
+                        probeBuffer.append(chunk);
+                        String probeText = probeBuffer.toString();
+
+                        // 检查缓冲区内容是否匹配"无结果"的模式
+                        if (isNoResultLike(probeText)) {
+                            // 确认为无结果响应：标记已完成
+                            completed.set(true);
+
+                            // 向下游发射预设的无结果响应消息
+                            sink.next(NO_RESULT_RESPONSE);
+
+                            // 完成整个 Flux（不再接收后续数据）
+                            sink.complete();
+
+                            // 取消对原始流的订阅，停止继续消费数据
+                            if (disposableRef[0] != null) {
+                                disposableRef[0].dispose();
+                            }
+                            return;
+                        }
+
+                        // 如果缓冲区长度达到了探测阈值（足够长的内容仍不匹配无结果模式）
+                        if (probeBuffer.length() >= STREAM_PROBE_CHARS) {
+                            // 进入透传模式
+                            passthrough.set(true);
+
+                            // 将之前累积的缓冲区内容一次性发射出去
+                            sink.next(probeText);
+
+                            // 清空缓冲区（后续数据直接透传，不再缓存）
+                            probeBuffer.setLength(0);
+                        }
+                    },
+
+                    // --- onError：原始流出错时的回调 ---
+                    sink::error,  // 直接将错误传递给下游
+
+                    // --- onComplete：原始流正常结束时的回调 ---
+                    () -> {
+                        // 如果已经完成或 sink 已被取消，不做任何操作
+                        if (completed.get() || sink.isCancelled()) {
+                            return;
+                        }
+
+                        // 如果从未进入透传模式（说明数据量小于探测阈值）
+                        if (!passthrough.get()) {
+                            // 对缓冲区中的完整内容进行规范化处理后发射
+                            sink.next(normalizeAnswer(probeBuffer.toString()));
+                        }
+
+                        // 完成整个 Flux
+                        sink.complete();
                     }
-                },
-                sink::error,
-                () -> {
-                    if (completed.get() || sink.isCancelled()) {
-                        return;
-                    }
-                    if (!passthrough.get()) {
-                        sink.next(normalizeAnswer(probeBuffer.toString()));
-                    }
-                    sink.complete();
-                }
             );
 
+            // 注册取消回调：当下游取消订阅时，释放对原始流的订阅
             sink.onCancel(() -> {
                 if (disposableRef[0] != null) {
                     disposableRef[0].dispose();

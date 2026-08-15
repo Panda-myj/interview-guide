@@ -491,7 +491,7 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
         }
 
         try {
-            byte[] audioData = Base64.getDecoder().decode(base64Audio);
+            byte[] audioData = Base64.getDecoder().decode(base64Audio); // Base64 解码音频帧
             log.debug("Received audio data for session {}, size: {} bytes", sessionId, audioData.length);
 
             try {
@@ -659,6 +659,10 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
 
                 aiReply = llmService.chatStreamSentences(
                     userText,
+                    /*- onToken 回调：推实时文字给前端（行 673）。
+                    - onSentence 回调：每检测到一个完整句子→chunkEmitter.submit(句子)
+                    触发这句的 TTS（行 676-682）—— TTS 和 LLM 继续生成并行。
+                    */
                     partialText -> {
                         if (partialText == null || partialText.isBlank() || !session.isOpen()) {
                             return;

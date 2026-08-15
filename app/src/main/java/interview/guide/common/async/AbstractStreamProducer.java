@@ -12,7 +12,7 @@ import java.util.Map;
  *
  * AbstractStreamProducer<T>：
  * 负责将业务对象 T 序列化为 Map，推送到指定 Stream，并捕获发送失败后的回调。
- * 两者都依赖 RedisService（封装了 Redisson 或 Lettuce 的 Stream 操作）。
+ * 两者都依赖 RedisService（封装了 Redisson 的 Stream 操作）。
  */
 @Slf4j
 public abstract class AbstractStreamProducer<T> {

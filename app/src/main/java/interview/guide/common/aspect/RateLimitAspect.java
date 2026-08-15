@@ -118,7 +118,7 @@ public class RateLimitAspect {
                 requestId
         };
 
-        /*首次：scriptLoad 将完整 Lua 脚本发送到 Redis 并缓存，返回 SHA1。
+        /*首次：scriptLoad 将完整 Lua 脚本发送到 Redis 并缓存，返回 SHA1,即此处的 luaScriptSha。
         后续：evalSha 只传 SHA1，Redis 从内存缓存中匹配执行。
         收益：避免每次限流都传输几 KB 的脚本文本，大幅降低网络 IO 开销。对于高频限流接口，这是必要的性能优化。*/
         try {
@@ -308,5 +308,5 @@ long result = switch (unit) {
 //潜在改进点
 //getClientIp() 的安全风险：如前所述，X-Forwarded-For 可被伪造。若限流用于安全防护，应改为只信任反向代理设置的特定 Header。
 //Fallback 反射性能：每次限流触发都做反射查找。可加一个 ConcurrentHashMap<Method+FallbackName, Method> 缓存，避免重复反射。
-//Lua 脚本内容不可见：当前代码未展示 rate_limit_single.lua 的具体实现。理解限流算法（滑动窗口 vs 令牌桶 vs 漏桶）的关键在 Lua 脚本中，建议结合脚本一起阅读。
+//理解限流算法（滑动窗口 vs 令牌桶 vs 漏桶）的关键在 Lua 脚本中，建议结合脚本一起阅读。
 //getCurrentUserId 耦合度高：硬编码了 userId 属性和 X-User-Id Header。更好的做法是注入一个 UserIdExtractor 策略接口，适配不同的认证体系。
