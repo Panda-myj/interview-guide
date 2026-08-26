@@ -476,9 +476,9 @@ llmprovider → resume → interviewschedule → knowledgebase → interview →
 
 - **一句话**：`HashMap` = **数组 + 链表 + 红黑树**。key 的 `hashCode` 取模定位数组下标，冲突用链表（Java 8 起超过 8 个且数组 ≥64 转红黑树），链表长度低于 6 再退化回链表。默认容量 16，负载因子 0.75，扩容时 `tableSizeFor` 翻倍。
 - **本项目对应**：`LlmProviderRegistry` 用 `ConcurrentHashMap`（线程安全版 HashMap）缓存 ChatClient。
-- **面试延伸**：为什么用 `(n-1) & hash` 而不是取模（位运算快，前提是容量是 2 的幂）；`put` 流程；多线程下 HashMap 为什么丢数据/死循环（JDK7 头插法扩容）。
+- **面试延伸**：为什么用 `(n-1) & hash` 而不是取模（位运算快，前提是容量是 2 的幂）；`put` 流程；多线程下 HashMap 为什么丢数据/死循环（是JDK7 头插法扩容导致的丢数据/死循环）。
 
-## 6.2 Java 并发    todo
+## 6.2 Java 并发
 
 ### 1. `ConcurrentHashMap` 凭什么线程安全？和 `HashMap`/`Hashtable` 的区别？
 
@@ -522,7 +522,7 @@ llmprovider → resume → interviewschedule → knowledgebase → interview →
 - **本项目对应**：语音面试 TTS 并发——`CompletableFuture.supplyAsync(() -> ttsService.synthesize(sentence), voicePipelineExecutor)` 让多个句子的语音合成并行，最后 `future.get(ttsTimeoutSec, SECONDS)` 限时等待。
 - **面试延伸**：`thenApply` vs `thenCompose`；异常处理 `exceptionally`/`handle`；与 WebFlux Reactor 的 `Flux/Mono` 的关系（本项目 RAG 用 `Flux` 流式推送）。
 
-### 8. `volatile` 解决什么问题？
+### 8. `volatile` 解决什么问题？  不熟
 
 - **一句话**：`volatile` 保证字段的**可见性**（写立刻对其它线程可见，基于内存屏障）和**有序性**（禁止指令重排），但**不保证原子性**。
 - **本项目对应**：消费者的 `running` 标志位用 volatile 控制消费循环的启停（`while(running)`）。
@@ -538,7 +538,11 @@ llmprovider → resume → interviewschedule → knowledgebase → interview →
 
 - **一句话**：`Semaphore`（信号量）控制**同时访问的并发数**，acquire 拿许可、release 归还；`CountDownLatch`（倒计数门闩）让一个线程**等 N 个任务都完成后**再继续。
 - **本项目对应**：`Semaphore` 限制每个语音面试会话的并发 TTS 合成数；`CountDownLatch` 异步转同步——等待 WebSocket 就绪或语音合成完成。
-- **面试延伸**：`CountDownLatch` 不可复用 vs `CyclicBarrier` 可复用；`Semaphore` 是共享锁的实现。
+- **面试延伸**：`CountDownLatch` 不可复用 vs `CyclicBarrier` 可复用；`Semaphore` 是共享锁的实现（信号量，资源量，N个可同时处理，限流神器）。
+
+**上述0815过完**
+
+**下面知识点0816过完，重整简历。**
 
 ---
 
@@ -601,8 +605,19 @@ llmprovider → resume → interviewschedule → knowledgebase → interview →
 ### 10. `application.yml`、`.env`、`profile` 分别是什么？
 
 - **一句话**：`application.yml` 是 Spring 主配置（端口、数据源、业务参数）；`.env` 存敏感密钥（API Key），由脚本/`@PostConstruct` 读进环境变量，**不进 Git**；profile（`application-dev.yml`）按环境切换配置。
+
 - **本项目对应**：所有 `AI_BAILIAN_API_KEY` 等密钥只在 `.env`；`app.ai.default-provider` 在 yml 可切换默认供应商；pgvector 的 `initialize-schema` 仅开发环境开启。
+
 - **面试延伸**：为什么密钥不能写进 yml/Jar（`~/.interview-guide/llm-providers.yml` 运行时隔离）；环境变量 vs 配置文件的优先级。
+
+  根据 Spring Boot 的配置优先级规则（从高到低）：
+
+  1. **命令行参数** (`java -jar app.jar --AI_BAILIAN_API_KEY=xxx`)
+  2. **系统环境变量** (`export AI_BAILIAN_API_KEY=xxx`) —— **.env 文件通常被脚本读取后注入到这里**
+  3. Jar 包外部的 `application-{profile}.yml`
+  4. Jar 包内部的 `application-{profile}.yml`
+  5. Jar 包外部的 `application.yml`
+  6. Jar 包内部的 `application.yml`
 
 ---
 
@@ -617,8 +632,12 @@ llmprovider → resume → interviewschedule → knowledgebase → interview →
 ### 2. `JpaRepository` 为什么不用写实现类？
 
 - **一句话**：Spring Data JPA 在运行时用 **JDK 动态代理**为接口生成实现类。自带 `save`/`findAll`/`findById`/`deleteById` 等全套 CRUD；方法名按约定解析成 SQL（`findBy + 属性 + OrderBy`）。
+
 - **本项目对应**：`LlmProviderRepository` 只有接口声明，`findByEnabledTrueOrderByIdAsc()` 自动翻译成 `SELECT * FROM llm_provider_config WHERE enabled = true ORDER BY id ASC`。
+
 - **面试延伸**：`save()` 的 INSERT/UPDATE 判断（主键是否存在，存在走 merge）；`@Query("...")` 写 JPQL 或 `nativeQuery=true` 写原生 SQL（本项目的 `VectorRepository` 就是原生 SQL 删向量）。
+
+  **删除和更新要加什么注解？**@Modifying + @Transactional。JPA 默认只做查询，增删改必须加 @Modifying 开启修改语句。
 
 ### 3. 主键策略有哪些？本项目用什么？
 
@@ -664,11 +683,19 @@ llmprovider → resume → interviewschedule → knowledgebase → interview →
 
 ### 10. pgvector 是什么？（项目专属八股）
 
-- **一句话**：PostgreSQL 的开源向量检索扩展，`CREATE EXTENSION vector` 后可以在同一张表里存普通列 + 向量列，支持 HNSW/IVFFlat 索引和 COSINE/内积/L2 距离。和业务数据同库同事务是最大优势。
+- **一句话**：pgvector 是 PostgreSQL 的开源向量检索扩展，`CREATE EXTENSION vector` 后可以在同一张表里存普通列 + 向量列，支持 HNSW/IVFFlat 索引和 COSINE/内积/L2 距离。和业务数据同库同事务是最大优势。
+
 - **本项目对应**：1024 维 + HNSW + COSINE，`text-embedding-v3` 对齐维度；`initialize-schema` 开发环境自动建表。
+
 - **面试延伸**：HNSW vs IVFFlat（HNSW 图索引召回高、构建慢；IVFFlat 聚类快但参数敏感）；向量维度 vs 召回质量 vs 存储成本。
 
+  ​
+
+  **0817看完上面，周二周三18，19，审稿 + 准备华为ai笔试**
+
 ---
+
+23看下面
 
 ## 6.5 计算机网络 / Web 协议
 
@@ -676,7 +703,7 @@ llmprovider → resume → interviewschedule → knowledgebase → interview →
 
 - **一句话**：请求 = 请求行（方法 + 路径 + 版本）+ 请求头 + 空行 + 请求体；响应 = 状态行 + 响应头 + 空行 + 响应体。常见状态码：**200** 成功、**201** 已创建、**400** 参数错误、**401** 未认证、**403** 无权限、**404** 不存在、**500** 服务器内部错误。
 - **本项目对应**：本项目约定**业务错误时 HTTP 仍然返回 200**，前端只看 `Result.code` 判断成败——这是项目自己约定的"业务码"体系（`ErrorCode`）。
-- **面试延伸**：RESTful 里 PUT vs PATCH vs POST；为什么推荐语义化状态码而不全是 200。
+- **面试延伸**：RESTful 里 PUT（全量更新） vs PATCH（部分更新）vs POST；为什么推荐语义化状态码而不全是 200。
 
 ### 2. GET 和 POST 的区别？
 
@@ -736,6 +763,14 @@ llmprovider → resume → interviewschedule → knowledgebase → interview →
 | **外观模式（门面）** | 对外暴露简单接口，隐藏内部子系统复杂度 | Controller 只调 Service 一个门面方法，Service 内部编排多个组件（本项目 `ResumeUploadService` 编排存储/解析/哈希/发消息） | 门面 vs 中间层；为什么 Controller 不写业务逻辑 |
 
 ---
+
+**0824看完上面，**
+
+
+
+**补充agent知识，项目**
+
+**下面的部分结合简历对照着有针对性地看**
 
 # 第七部分：技术选型与设计决策（面试核心弹药）
 

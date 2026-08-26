@@ -40,10 +40,6 @@ import java.util.regex.Pattern;
  <br>4. 接入 Micrometer + Prometheus 指标（invocations / attempts / latency / success vs failure），便于后续调优和监控。 |
 
 | R 结果 |结构化输出解析成功率从约 70% → ~100%（2 次重试覆盖绝大多数格式问题）；业务代码无需分散处理 JSON 解析异常，调用量下降约 60% 的冗余 try-catch；指标面板可实时观测 AI 调用质量。 |
-
-
-答疑：
-
 */
 
 

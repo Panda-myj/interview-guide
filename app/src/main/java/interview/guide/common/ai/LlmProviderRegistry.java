@@ -240,7 +240,7 @@ public class LlmProviderRegistry {
         log.info("[LlmProviderRegistry] Created plain ChatClient (no tools) for {}", providerId);
         return builder.build();
     }
-    //todo：这些工具调用都是什么？
+
     private ChatClient createVoiceChatClient(String providerId) {
         OpenAiChatModel chatModel = getChatModel(providerId);
 
@@ -353,7 +353,7 @@ public class LlmProviderRegistry {
 
         return advisors;
     }
-//    todo:工具调用有什么用？
+
     private ToolCallingAdvisor buildToolCallAdvisor(boolean conversationHistoryEnabled) {
         return ToolCallingAdvisor.builder()
             .toolCallingManager(toolCallingManager)

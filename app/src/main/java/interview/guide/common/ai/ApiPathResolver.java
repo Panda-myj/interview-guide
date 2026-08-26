@@ -24,13 +24,9 @@ public final class ApiPathResolver {
   }
 /*. 工厂方法：构建带超时的 OpenAIClient
 buildOpenAiClient 方法负责把 HttpClient 组装好，具体做了四件事：
-
 凭证注入：将 apiKey 包装成 BearerTokenCredential（HTTP Header Authorization: Bearer xxx）。
-
 超时配置：默认连接超时 10 秒，读取超时 300 秒（5分钟）。注意这个读超时极长，说明这个客户端很可能用于流式输出（Streaming）或处理耗时极长的推理任务。
-
 HttpClient 适配：复用了 Spring AI 框架提供的 SpringAiOpenAiHttpClient，使得底层网络层与 Spring 生态保持一致（便于链路追踪和代理配置）。
-
 实例化：最终生成 OpenAIClientImpl 具体实现类。*/
   public static OpenAIClient buildOpenAiClient(String baseUrl, String apiKey,
       int connectTimeout, int readTimeout) {
