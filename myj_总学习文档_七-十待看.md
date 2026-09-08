@@ -768,7 +768,7 @@ llmprovider → resume → interviewschedule → knowledgebase → interview →
 
 
 
-**补充agent知识，项目**
+**25 26 27补充了agent知识，在win重跑通了项目**
 
 **下面的部分结合简历对照着有针对性地看**
 
@@ -1695,6 +1695,14 @@ catch (Exception e) {
 | `RAtomicLong`（Redisson） | 分布式原子计数器 |
 
 **总结：** 项目目前以 **JVM 单机锁**（`ReentrantReadWriteLock`、`synchronized`）和 **数据库事务锁** 为主，**分布式锁基础设施**（Redisson RLock）已封装好但尚未被业务代码实际调用。没有使用 JPA 显式锁模式或 Redisson 高级锁（公平锁、读写锁、红锁等）。
+
+
+
+
+
+- 项目里的每张表能讲清"为什么这么设计、索引怎么建的、数据量大了怎么办"
+
+
 
 ---
 

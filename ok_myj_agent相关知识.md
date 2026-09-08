@@ -387,10 +387,6 @@ return historyMessages.reversed().stream()
 
 ---
 
-
-
-0826看完上面，0827看下面至结束
-
 ## 8. RAG 检索增强生成
 
 ### 8.1 概念
@@ -457,14 +453,14 @@ catch (Exception e) { cleanupPendingVectorJob(knowledgeBaseId, jobId); }
 private SearchParams resolveSearchParams(String question) {
     int compactLength = question.replaceAll("\\s+", "").length();
     if (compactLength <= shortQueryLength) {
-        return new SearchParams(topkShort, minScoreShort);  // 短问题：更少 topK + 更高阈值
+        return new SearchParams(topkShort, minScoreShort);
     }
     ...
-    return new SearchParams(topkLong, minScoreDefault);  // 长问题：更多 topK + 默认阈值
+    return new SearchParams(topkLong, minScoreDefault);
 }
 ```
 
-短问题语义稀疏，容易误命中，所以**收紧阈值 + 减少 topK**；长问题语义丰富，放宽参数召回更多。
+query 是检索的"探针"——探针越粗糙（短），越需要大范围搜索；探针越精准（长），越可以精确打击。
 
 ### 8.6 检索兜底：前置过滤失败回退本地过滤
 
@@ -607,7 +603,7 @@ public Result query() { ... }
 ```
 
 - **可重复注解**（`@Repeatable`）：同一方法标注多条规则（全局 + 单 IP），任一超限即拒绝
-- **滑动窗口限流**：Redis Lua 脚本原子执行（`scripts/rate_limit_single.lua`），避免"读-判-写"竞态
+- **滑动窗口限流**：Redis Lua 脚本**原子执行**（`scripts/rate_limit_single.lua`），避免"读-判-写"竞态
 - **`scriptLoad` + `evalSha`**：脚本只传 SHA1，避免每次传输几 KB 脚本文本；Redis 重启后 `NOSCRIPT` 异常自动重载
 - **降级方法**（`fallback`）：限流触发时反射调用同类的降级方法，而非直接抛异常
 

@@ -39,13 +39,23 @@
 ### 2.2 查询必会点
 
 - **五种连接**：INNER JOIN、LEFT/RIGHT JOIN、FULL JOIN（MySQL 用 UNION 模拟）、CROSS JOIN
+
 - **子查询**：标量子查询、行子查询、表子查询；`IN` vs `EXISTS` 的区别（数据量大时 EXISTS 通常更优）
+
 - **聚合与分组**：GROUP BY + HAVING（WHERE 过滤行，HAVING 过滤分组）
+
 - **执行顺序**（面试常考）：
   ```
-  FROM → JOIN/ON → WHERE → GROUP BY → HAVING → SELECT → DISTINCT → ORDER BY → LIMIT
+  FROM  →  ON  →  JOIN  →  WHERE  →  GROUP BY  →  HAVING  →  SELECT  →  DISTINCT  →  ORDER BY  →  LIMIT
   ```
   因为 SELECT 在 WHERE 之后执行，所以 **WHERE 里不能用 SELECT 中定义的列别名**，ORDER BY 可以。
+
+  > **福(FROM) 建(JOIN/ON) 委(WHERE) 组(GROUP BY)，还(HAVING) 选(SELECT) 重(DISTINCT) 排(ORDER BY) 名(LIMIT)**
+  >
+  > 谐音：**「福建委组，还选重排名」**
+
+  前半句 **「福建委组」** 管"怎么把数据凑出来"，后半句 **「还选重排名」** 管"怎么把结果收拾好"。十个字分四拍，读两遍就记住了。
+
 - **窗口函数**（大厂笔试高频）：`ROW_NUMBER()`、`RANK()`、`DENSE_RANK()`、`LEAD/LAG`、`SUM() OVER(...)`
 
 ### 2.3 经典手写 SQL 题型（笔试必刷）
@@ -54,14 +64,35 @@
    ```sql
    SELECT DISTINCT salary FROM Employee ORDER BY salary DESC LIMIT 1 OFFSET N-1;
    ```
+   **MySQL 的 LIMIT / OFFSET 后面不允许写算术表达式**（`N-1` 会被当成语法错误）。这不是笔误，正是 LeetCode 177 被设计成**「写函数」而不是「写查询」**的原因——它逼你先 `SET` 再 `LIMIT`。
+
+   ```
+   -- ✅ 正解（LeetCode 177 标准答案形态）
+   CREATE FUNCTION getNthHighestSalary(N INT) RETURNS INT
+   BEGIN
+     SET N = N - 1;                                    -- ← 必须先减
+     RETURN (
+       SELECT DISTINCT salary FROM Employee
+       ORDER BY salary DESC LIMIT N, 1        -- 等价于 LIMIT 1 OFFSET N
+     );
+   END
+   ```
+
 2. **分组内取 TopN**（每个部门工资最高的前 3 人）→ 窗口函数 `ROW_NUMBER() OVER(PARTITION BY dept ORDER BY salary DESC)`
+
 3. **连续登录 N 天的用户** → `ROW_NUMBER` 与日期作差，差值相同即连续
+
 4. **删除重复数据保留一条** → `DELETE ... WHERE id NOT IN (SELECT min(id) ...)`
+
 5. **分数排名 / 中位数 / 行列转换**
 
 > 刷题路径：LeetCode 数据库标签 70+ 题，重点刷 Top 50 liked。
 
 ---
+
+先看元宝关于上面的回答，再看下面。
+
+
 
 ## 三、MySQL 深入（L2 核心，面试 60% 的问题出自这里）
 
@@ -97,7 +128,7 @@
 
 #### 索引失效场景（高频问答）
 1. 对索引列做函数/运算：`WHERE DATE(create_time) = '2026-08-25'`
-2. 隐式类型转换：varchar 字段用数字查询
+2. 隐式类型转换：varchar 字段用数字查询。关键：当**字符串**和**数字**比较时，MySQL 会把**两边都转成浮点数**再比。
 3. `LIKE` 以 `%` 开头
 4. 违反最左前缀
 5. OR 连接的条件中有非索引列
@@ -115,6 +146,8 @@
 - `Extra`：`Using filesort`（需要额外排序，考虑建索引）、`Using temporary`（临时表）、`Using index`（覆盖索引，好事）
 
 **慢查询排查流程**：开慢查询日志 → `mysqldumpslow` 找出慢 SQL → EXPLAIN 分析 → 加索引/改写 SQL/拆分子查询。
+
+
 
 ### 3.4 事务（高频）
 
@@ -233,9 +266,31 @@
 ## 五、数据库设计（项目面必问）
 
 1. **三大范式**：1NF 字段原子性；2NF 消除部分依赖（非主属性完全依赖主键）；3NF 消除传递依赖。**实际工程允许合理反范式设计（冗余字段换查询性能）**
+
+   ### 补一个 BCNF（巴斯-科德范式）—— 加分项
+
+   3NF 只约束**非主属性**，BCNF 进一步要求**主属性**也不能对候选码存在部分/传递依赖。
+
+   **例子**：某老师只教一门课，一门课有多个老师（老师 → 课程）
+
+   sql
+
+   sql
+
+   ```
+   teach: (student_id, course) → teacher,  teacher → course
+   -- 候选码: (student_id, course) 和 (student_id, teacher)
+   -- teacher 是主属性，但它决定 course → 违反 BCNF
+   ```
+
+   实际工程中**做到 3NF 就够了**，BCNF 主要用于消除"多对多 + 函数依赖"交织导致的冗余。知道它的存在能体现你的体系性。
+
 2. **字段设计原则**：能用 tinyint 不用 int；金额用 DECIMAL 不用 float/double（精度丢失）；时间用 datetime/timestamp；尽量 NOT NULL + 默认值
+
 3. **必备字段意识**：id、create_time、update_time、is_deleted（逻辑删除）、version（乐观锁）
+
 4. **乐观锁 vs 悲观锁**：乐观锁用 version/CAS（读多写少）；悲观锁 `SELECT ... FOR UPDATE`（写冲突多）
+
 5. 被问"你的项目表怎么设计的"时，按 **业务实体 → 关系（1:1/1:N/M:N）→ 字段 → 索引（哪些查询建的哪些索引）→ 数据量预估与扩展** 这个套路讲
 
 ---
@@ -266,29 +321,3 @@
 7. 过期删除策略和内存淘汰策略？
 8. 哨兵和 Cluster 的区别？哈希槽是什么？
 
----
-
-## 七、30 天备考路线
-
-| 阶段 | 时间 | 内容 |
-|------|------|------|
-| 第 1 周 | SQL 基础 | 牛客/LeetCode 数据库题每天 3-5 道，重点连接查询、窗口函数 |
-| 第 2 周 | MySQL 原理 | 索引 → 事务 → MVCC → 锁 → 日志，逐个攻破，每块能脱稿讲 5 分钟 |
-| 第 3 周 | Redis + 调优 | Redis 五块核心 + EXPLAIN 实操 + 整理自己项目的数据库设计 |
-| 第 4 周 | 场景题 + 模拟 | 秒杀/排行榜/Feed 流场景设计；对着第 6 节清单自问自答录音复盘 |
-
-**推荐资料**：
-- 《MySQL 是怎样运行的》《Redis 设计与实现》
-- 极客时间《MySQL 实战 45 讲》《Redis 核心技术与实战》
-- JavaGuide / 小林 coding（图解 MySQL、图解 Redis）
-
----
-
-## 八、一句话自检标准
-
-✅ 达到以下状态即可放心上战场：
-
-- 任意给我一张表 + 一条慢 SQL，能用 EXPLAIN 讲清问题并给出 2 种以上优化方案
-- 脱稿画出 B+ 树结构，讲清 MVCC 的版本链 + ReadView 判断流程
-- 脱口说出缓存三大问题的区别和各自解决方案，并能结合项目举例
-- 项目里的每张表能讲清"为什么这么设计、索引怎么建的、数据量大了怎么办"

@@ -26,7 +26,7 @@ services:
     image: redis:7
     container_name: interview-redis
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -49,10 +49,11 @@ services:
     volumes:
       - rustfs_data:/data
     healthcheck:
-      test: ["CMD-SHELL", "timeout 3 sh -c 'cat < /dev/null > /dev/tcp/localhost/9000' || exit 1"]
+      test: ["CMD", "sh", "-c", "curl --max-time 2 -s -o /dev/null -w '%{http_code}' http://localhost:9000/minio/health/live | grep -E '^(200|403)$'"]
       interval: 5s
       timeout: 3s
       retries: 5
+      start_period: 10s
 
 # 首次启动后，浏览器访问 http://localhost:9001
 # 使用 ${RUSTFS_ACCESS_KEY} / ${RUSTFS_SECRET_KEY} 登录，手动创建名为 interview-guide 的 bucket
