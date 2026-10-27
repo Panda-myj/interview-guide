@@ -46,7 +46,7 @@ InterviewGuide 是一个集成了简历分析、模拟面试（文字 + 语音�
 | iText 8               | 8.0.5 | PDF 导出                      |
 | MapStruct             | 1.6.3 | 对象映射                      |
 | SpringDoc OpenAPI     | 3.0.2 | API 接口文档                  |
-| DashScope SDK         | 2.22.7 | 语音识别/合成（Qwen3 ASR/TTS）|
+| DashScope SDK         | 2.23.3 | 语音识别/合成（Qwen3 ASR/HTTP TTS）|
 | AWS S3 SDK            | 2.29.51 | S3 兼容对象存储（MinIO/RustFS）|
 | WebSocket             | -     | 语音面试实时双向通信          |
 | Gradle                | 8.14  | 构建工具                      |
@@ -105,13 +105,13 @@ InterviewGuide 是一个集成了简历分析、模拟面试（文字 + 语音�
 
 实时语音对话面试，WebSocket + 千问3 语音模型（ASR/TTS/LLM 统一 API Key）：
 
-- **实时流式对话**：句子级并发 TTS，边生成边合成边播放，首包延迟 200ms
+- **流式对话**：LLM 实时输出，句子级并发 HTTP TTS，逐句播放
 - **服务端 VAD**：自动断句，实时字幕（含中间结果）
 - **回声防护 + 手动提交**：避免 AI 语音被误录入
 - **多轮上下文记忆 + 暂停/恢复**：超时自动暂停
 - **Micrometer 埋点**：TTS/ASR 延迟、会话时长等指标
 
-> **已知问题**：端到端延迟偏高（服务端音频中转）、无耳机时回声泄漏、TTS 音色单一、弱网音频断续。后续计划探索 WebRTC、客户端 VAD 降噪、端到端语音模型等方案。
+> **已知问题**：端到端延迟偏高（服务端音频中转）、无耳机时回声泄漏、TTS 音色单一、弱网音频断续。服务端 TTS 不可用时会自动回退到浏览器中文语音。
 
 ### 知识库管理模块
 
@@ -331,10 +331,8 @@ docker compose -f docker-compose.dev.yml down -v
 > **注意**：应用启动时会自动检查并创建 `interview-guide` Bucket。使用 `docker-compose.dev.yml` + `:app:bootRun` 时，请确保 `.env` 中的 `APP_STORAGE_ACCESS_KEY` / `APP_STORAGE_SECRET_KEY` 与 RustFS 账号一致，例如都设为 `rustfsadmin`。如果本地已有 MinIO 或其他 S3 兼容存储，也可以直接使用，在 `.env` 中修改 `APP_STORAGE_*` 配置即可。
 
 > **IDEA Docker Debug 提示**：如果在 macOS 上使用 IntelliJ IDEA 的 Docker 调试方式启动后端，遇到 `mounts denied: The path /Applications/IntelliJ IDEA.app/Contents/lib is not shared from the host`，请在 Docker Desktop 的 `Settings -> Resources -> File Sharing` 中加入 `/Applications/IntelliJ IDEA.app/Contents/lib`（或整个 `/Applications/IntelliJ IDEA.app`）以及当前项目目录，然后重启 Docker/IDEA 后再运行。普通 `./gradlew :app:bootRun` 和 `docker compose` 启动不需要这个额外共享路径。
-# 如果是首次启动 RustFS，需要手动创建 bucket：
-#    浏览器访问 http://localhost:9001
-#    用 rustfsadmin / rustfsadmin 登录
-#    创建名为 interview-guide 的 bucket
+ 
+如果是首次启动 RustFS，需要手动创建 bucket： 浏览器访问 http://localhost:9001,用 rustfsadmin / rustfsadmin 登录 ,创建名为 interview-guide 的 bucket
 ### 4. 启动应用
 
 **后端：**
@@ -395,6 +393,34 @@ docker-compose up -d --build
 ```
 
 > **仅启动依赖服务**：如果只想本地开发调试（用 `./gradlew :app:bootRun` 启动后端），可以只启动基础设施：`docker compose up -d postgres redis minio createbuckets`。将 `.env.example` 复制为 `.env` 并填写 `AI_BAILIAN_API_KEY` 即可，默认账号与 `docker-compose.yml` 一致；Bucket 会由初始化任务或应用启动检查自动创建。
+
+#### 生产模式（Spring Profile）
+
+`docker-compose.yml` 中的后端服务默认以 `SPRING_PROFILES_ACTIVE=prod` 运行，加载 `app/src/main/resources/application-prod.yml`。相对开发默认值，生产模式会：
+
+- 关闭自动建表（`ddl-auto: validate`）与自动创建向量表（`initialize-schema: false`）；
+- 关闭 SQL 打印，收紧 CORS 白名单，Actuator 默认只暴露 `health,info`，健康详情不外泄；
+- 启用反向代理转发头，并把日志写入文件（挂载 `app_logs` 卷持久化）。
+
+**首次部署空库**时表尚不存在，`validate` 会导致启动失败，请先做一次性初始化，建表后立即改回。在根目录 `.env` 中临时添加：
+
+```bash
+# .env（仅首次建表时临时添加两行）
+JPA_DDL_AUTO=update
+PGVECTOR_INIT_SCHEMA=true
+```
+
+```bash
+# 建表
+docker compose up -d --build
+
+# 确认表已创建后，从 .env 删除上面两行，恢复 validate / false 并重新部署
+docker compose up -d --build app
+```
+
+生产上线前请务必核对 `.env`：`APP_AI_CONFIG_ENCRYPTION_KEY` 必须为随机长字符串且部署后保持不变；同时修改 `POSTGRES_PASSWORD` 与 MinIO 的 `MINIO_ROOT_USER/PASSWORD`，并将 `CORS_ALLOWED_ORIGINS` 设为真实域名（`docker-compose.yml` 中 MinIO/PG/Redis 的宿主机端口映射建议仅保留内网或移除，只对外暴露 80）。
+
+若需在本机沿用开发默认行为跑全栈容器，可设置 `SPRING_PROFILES_ACTIVE=dev`（或留空）。
 
 ### 3. 服务访问
 
@@ -488,7 +514,7 @@ spring:
 
 ### Q: 语音面试无法识别或没有声音？
 
-语音面试的 ASR/TTS 默认也使用 `AI_BAILIAN_API_KEY`。请检查浏览器麦克风权限、后端日志中的 DashScope WebSocket 连接状态，以及设置页里的 ASR/TTS 测试结果。无耳机时可能触发回声录入，建议先使用手动提交模式或佩戴耳机测试。
+语音面试的 ASR/TTS 默认也使用 `AI_BAILIAN_API_KEY`。请检查浏览器麦克风权限和后端日志中的 DashScope 连接状态。浏览器麦克风只能在 HTTPS 或 localhost 使用。若日志出现 `AllocationQuota.FreeTierOnly`，需要在阿里云百炼控制台关闭“仅使用免费额度”或开通付费额度；额度不可用时页面会切换到浏览器中文语音。
 
 ### Q: 简历分析一直显示"分析中"？
 

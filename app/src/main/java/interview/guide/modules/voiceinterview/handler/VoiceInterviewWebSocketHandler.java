@@ -244,6 +244,8 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
                 byte[] wavAudio = getOpeningWavAudio(aiReply);
                 if (wavAudio.length > 0 && session.isOpen()) {
                     sendAudio(session, wavAudio, aiReply);
+                } else if (session.isOpen()) {
+                    sendTtsUnavailable(session, ttsService.getLastError());
                 }
 
                 log.info("Opening question sent for session {}", sessionId);
@@ -720,13 +722,18 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
                     if (emittedChunks == 0 && session.isOpen()) {
                         log.info("[Session: {}] Streaming TTS produced no chunks, falling back to full-text TTS",
                             sessionId);
+                        boolean fallbackSent = false;
                         try {
                             byte[] fallbackPcm = ttsService.synthesize(aiReply);
                             if (fallbackPcm != null && fallbackPcm.length > 0) {
                                 sendAudio(session, convertPcmToWav(fallbackPcm), aiReply);
+                                fallbackSent = true;
                             }
                         } catch (Exception e) {
                             log.warn("[Session: {}] Fallback TTS failed: {}", sessionId, e.getMessage());
+                        }
+                        if (!fallbackSent) {
+                            sendTtsUnavailable(session, ttsService.getLastError());
                         }
                     }
                 } else if (!ttsFutures.isEmpty()) {
@@ -789,6 +796,7 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
                         } else {
                             log.error("[Session: {}] All TTS calls returned empty audio", sessionId);
                             incrementCounter("app.voice.interview.tts.empty_audio", "status", "empty");
+                            sendTtsUnavailable(session, ttsService.getLastError());
                         }
                     }
                 }
@@ -820,6 +828,7 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
                 if (aiAudio == null || aiAudio.length == 0) {
                     log.error("[Session: {}] TTS returned empty audio", sessionId);
                     incrementCounter("app.voice.interview.tts.empty_audio", "status", "empty");
+                    sendTtsUnavailable(session, ttsService.getLastError());
                 } else {
                     byte[] wavAudio = convertPcmToWav(aiAudio);
                     sendAudio(session, wavAudio, aiReply);
@@ -916,6 +925,21 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
                 "type", "audio",
                 "data", base64Audio,
                 "text", text
+        )));
+    }
+
+    private void sendTtsUnavailable(WebSocketSession session, String reason) {
+        if (session == null || !session.isOpen()) {
+            return;
+        }
+        String message = reason == null || reason.isBlank()
+            ? "服务端语音合成暂不可用，请检查 TTS 配置"
+            : reason;
+        sendMessage(session, toJson(Map.of(
+            "type", "control",
+            "action", "tts_unavailable",
+            "message", message,
+            "timestamp", System.currentTimeMillis()
         )));
     }
 
@@ -1303,8 +1327,8 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
      * @return WAV formatted audio data
      */
     private byte[] convertPcmToWav(byte[] pcmData) {
-        // Use 24000Hz for Qwen TTS Realtime API
-        int sampleRate = 24000;
+        // 与 QwenTtsService 的输出采样率保持单一事实来源，避免两处硬编码漂移
+        int sampleRate = QwenTtsService.OUTPUT_SAMPLE_RATE;
         int bitsPerSample = 16;
         int numChannels = 1;
         int byteRate = sampleRate * numChannels * bitsPerSample / 8;

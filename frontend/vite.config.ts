@@ -33,14 +33,12 @@ export default defineConfig(({ mode }) => {
           target: apiProxyTarget,
           changeOrigin: true,
         },
+        '/ws': {
+          target: apiProxyTarget,
+          changeOrigin: true,
+          ws: true,
+        },
       },
-      // 忽略 @ricky0123/vad-web 的 sourcemap 警告
-      sourcemapIgnoreList: (relativeSourcePath) => {
-        return relativeSourcePath.includes('node_modules/.pnpm/@ricky0123+vad-web');
-      },
-    },
-    optimizeDeps: {
-      // No need to optimize vad-web since we load it via script tag
     },
   }
 });

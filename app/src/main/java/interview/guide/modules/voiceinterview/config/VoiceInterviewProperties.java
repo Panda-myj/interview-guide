@@ -138,8 +138,12 @@ public class VoiceInterviewProperties {
 
     @Data
     public static class QwenTtsConfig {
-        private String model = "qwen3-tts-flash-realtime";
+        private String model = "qwen3-tts-flash";
         private String apiKey;
+        /**
+         * 旧版实时 TTS 地址，仅保留用于配置兼容；当前 HTTP TTS 不使用该字段。
+         */
+        private String url = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime";
         private String voice = "Cherry";
         private String format = "pcm";
         private int sampleRate = 24000;

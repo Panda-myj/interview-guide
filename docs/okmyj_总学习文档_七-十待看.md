@@ -858,7 +858,7 @@ llmprovider → resume → interviewschedule → knowledgebase → interview →
 
 ---
 
-# 第八部分：核心技术机制深入
+# 第八部分：核心技术机制深入   关键！！！
 
 ## 7.1 LlmProviderRegistry 关键设计与实现细节
 
@@ -1247,9 +1247,9 @@ byte[] pcm = ttsService.synthesize("你好，请介绍一下你自己");
 - **流式模式** (`chunkedAudioEnabled=true`)：LLM 边说边合成，每句独立 TTS 并发执行（`OrderedTtsChunkEmitter`），不等全部说完
 - **合并模式** (`chunkedAudioEnabled=false`)：LLM 全部返回后统一合成
 
-### 四、流式评估在哪里？
+### 四、评估在哪里？
 
-**评估不是流式的，而是异步离线评估。** 流式体现在 LLM 对话生成。
+**评估是异步离线评估。** 流式体现在 LLM 对话生成。
 
 **LLM 流式输出 → `DashscopeLlmService.java:69-155` 的 `chatStreamSentences()`：**
 
@@ -1703,7 +1703,6 @@ catch (Exception e) {
 - 项目里的每张表能讲清"为什么这么设计、索引怎么建的、数据量大了怎么办"
 
 
-
 ---
 
 # 第九部分：面试高频考点速查
@@ -1726,7 +1725,7 @@ catch (Exception e) {
 
 # 第十部分：可继续深挖的方向
 
-2. 语音面试 WebSocket 协议细节（消息帧格式、断线重连、音频编解码 opus→pcm）。
+1. 语音面试 WebSocket 协议细节（消息帧格式、断线重连、音频编解码 opus→pcm）。
 3. RAG 查询改写的具体提示词（`prompts/knowledgebase-rewrite.st`）。
 4. 统一评估报告的具体维度与打分逻辑（`ResumeAnalysisResponse.ScoreDetail` 五维）。
 4. 已识别的可改进点（todo）：

@@ -68,7 +68,7 @@ dependencies {
     implementation "com.itextpdf:font-asian:${libs.versions.itext.get()}"
 
     // Aliyun DashScope SDK for Qwen3 ASR/TTS (replaces NLS SDK)
-    implementation('com.alibaba:dashscope-sdk-java:2.22.7') {
+    implementation('com.alibaba:dashscope-sdk-java:2.23.3') {
         exclude group: 'org.slf4j', module: 'slf4j-simple' // 使用 Spring Boot 的 Logback
     }
 

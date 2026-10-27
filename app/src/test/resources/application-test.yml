@@ -142,7 +142,7 @@ app:
 
       tts:
         url: wss://dashscope.aliyuncs.com/api-ws/v1/realtime
-        model: qwen3-tts-flash-realtime
+        model: qwen3-tts-flash
         api-key: test-api-key
         voice: Cherry
         format: pcm

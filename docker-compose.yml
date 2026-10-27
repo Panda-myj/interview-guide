@@ -18,6 +18,7 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
       POSTGRES_DB: interview_guide
+      ACTUATOR_ENDPOINTS: health,info,metrics,prometheus
     volumes:
       # 数据持久化：确保容器重启或删除后，数据库数据不丢失
       - postgres_data:/var/lib/postgresql/data
@@ -139,6 +140,11 @@ services:
       createbuckets:
         condition: service_completed_successfully # 等待初始化任务完成
     environment:
+      # === 运行环境 ===
+      # 默认以生产模式运行（加载 application-prod.yml）。
+      # 本地全栈调试若想沿用开发默认行为，可设置 SPRING_PROFILES_ACTIVE=dev
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-prod}
+
       # === 数据库连接 ===
       # 使用服务名 'postgres' 作为主机名，Docker 内部 DNS 会自动解析
       POSTGRES_HOST: postgres
@@ -168,6 +174,18 @@ services:
       # === 面试参数配置 ===
       APP_INTERVIEW_FOLLOW_UP_COUNT: ${APP_INTERVIEW_FOLLOW_UP_COUNT:-1}
       APP_INTERVIEW_EVALUATION_BATCH_SIZE: ${APP_INTERVIEW_EVALUATION_BATCH_SIZE:-8}
+
+      # === 生产 Profile 可调项（详见 application-prod.yml）===
+      # 首次部署空库：临时 JPA_DDL_AUTO=update、PGVECTOR_INIT_SCHEMA=true 建表，之后改回 validate / false
+      JPA_DDL_AUTO: ${JPA_DDL_AUTO:-validate}
+      PGVECTOR_INIT_SCHEMA: ${PGVECTOR_INIT_SCHEMA:-false}
+      # CORS 白名单：生产请改成真实访问域名，多个用英文逗号分隔
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost,http://127.0.0.1}
+      # 文件日志路径（容器内，挂载 app_logs 卷持久化）
+      LOG_FILE: ${LOG_FILE:-logs/app.log}
+    volumes:
+      # 持久化应用日志（容器内 /app/logs 对应 application-prod.yml 的 logging.file.name）
+      - app_logs:/app/logs
     ports:
       - "8080:8080"
 
@@ -196,3 +214,4 @@ volumes:
   postgres_data:
   redis_data:
   minio_data:
+  app_logs:

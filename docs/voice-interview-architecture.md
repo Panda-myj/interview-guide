@@ -10,7 +10,7 @@ AI语音面试系统是一个实时语音交互的智能面试平台，集成了
 **核心技术升级**：项目已从 Aliyun NLS SDK 升级到 Qwen3 实时语音模型，实现更低延迟和更高准确率：
 - **ASR 准确率**: ~95%+（提升 5%+）
 - **ASR 断句延迟**: 400ms（减少 50%）
-- **TTS 首包延迟**: 200ms（减少 60%）
+- **TTS 可用性**: HTTP TTS 失败可快速上报，并由浏览器中文语音兜底
 - **配置简化**: 从 9 个环境变量减少到 2 个（统一使用 `AI_BAILIAN_API_KEY`）
 
 ## 🏗️ 系统架构图
@@ -204,17 +204,18 @@ GET    /api/voice-interview/sessions/{id}/evaluation # 获取评估报告
 - **支持**: 多 LLM 提供商（DashScope/MiniMax/OpenAI/DeepSeek/LM Studio）
 
 #### QwenTtsService
-- **职责**: 实时语音合成
-- **技术**: Qwen3 TTS Flash Realtime (DashScope SDK 2.22.7)
-- **模型**: qwen3-tts-flash-realtime
+- **职责**: 语音合成与失败降级
+- **技术**: Qwen3 TTS Flash HTTP API (DashScope SDK 2.23.3)
+- **模型**: qwen3-tts-flash
 - **音色**: Cherry（温柔女声）
 - **功能**:
   - 文字转语音流
   - 流式合成（边合成边播放）
   - 中文优化
   - PCM格式输出
-- **性能**:
-  - 首包延迟: 200ms（快 60%）
+- **可靠性**:
+  - 额度、鉴权、超时错误快速返回
+  - 服务端失败时前端自动回退到浏览器中文语音
   - 语速/音量可配置
 
 #### VoiceInterviewPromptService
@@ -463,7 +464,7 @@ app:
       # Qwen3 TTS 配置
       tts:
         url: wss://dashscope.aliyuncs.com/api-ws/v1/realtime
-        model: qwen3-tts-flash-realtime
+        model: qwen3-tts-flash
         api-key: ${AI_BAILIAN_API_KEY}
         voice: Cherry
         format: pcm

@@ -238,7 +238,31 @@ export default function Interview({
     );
   }
 
-  if (!session || !currentQuestion) return null;
+  if (!session || !currentQuestion) {
+    return (
+      <div className="flex items-center justify-center min-h-[50vh]">
+        <div className="text-center">
+          <p className="text-red-500 dark:text-red-400 mb-4">
+            未生成面试题目，请重试或返回面试中心
+          </p>
+          <div className="flex gap-3 justify-center">
+            <button
+              onClick={startInterview}
+              className="px-5 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600"
+            >
+              重试
+            </button>
+            <button
+              onClick={onBack}
+              className="px-5 py-2 bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-lg hover:bg-slate-300 dark:hover:bg-slate-600"
+            >
+              返回
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="pb-10">

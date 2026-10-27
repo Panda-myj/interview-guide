@@ -143,7 +143,7 @@ public class KnowledgeBaseVectorService {
             if (results == null) {
                 return List.of();
             }
-
+            
             // Apply topK limiting in case VectorStore returns more than requested
             List<Document> limitedResults = results.stream()
                 .limit(topK)

@@ -129,8 +129,13 @@ public class InterviewQuestionService {
 
         SkillDTO skill = resolveSkill(skillId, customCategories, jdText);
         String difficultyDesc = resolveDifficulty(difficulty);
-        ChatClient questionChatClient =
-            llmProviderRegistry.getPlainChatClient(llmProvider);
+        ChatClient questionChatClient;
+        try {
+            questionChatClient = llmProviderRegistry.getPlainChatClient(llmProvider);
+        } catch (Exception e) {
+            log.error("LLM 客户端初始化失败，回退到默认题库: {}", e.getMessage(), e);
+            return generateFallbackQuestions(skill, questionCount);
+        }
 
         boolean hasResume = resumeText != null && !resumeText.isBlank();
         String historicalSection = buildHistoricalSection(historicalQuestions);
@@ -264,8 +269,6 @@ public class InterviewQuestionService {
             log.info("方向题生成完成: 请求={}, 实际主问题={}",
                 questionCount, questions.stream().filter(q -> !q.isFollowUp()).count());
             return questions;
-        } catch (BusinessException e) {
-            throw e;
         } catch (Exception e) {
             log.error("方向题生成失败，回退到默认问题: {}", e.getMessage(), e);
             return generateFallbackQuestions(skill, questionCount);

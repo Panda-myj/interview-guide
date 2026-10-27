@@ -242,6 +242,38 @@ export const voiceInterviewApi = {
 
 };
 
+/**
+ * Resolve the interview WebSocket against the page origin so Vite/Nginx can
+ * proxy it correctly in development, LAN access and HTTPS deployments.
+ */
+export function resolveVoiceInterviewWebSocketUrl(
+  sessionId: number,
+  serverUrl?: string
+): string {
+  const currentOrigin = new URL(window.location.origin);
+  const fallbackPath = `/ws/voice-interview/${sessionId}`;
+  let target: URL;
+
+  try {
+    const candidate = serverUrl
+      ? new URL(serverUrl, currentOrigin)
+      : new URL(fallbackPath, currentOrigin);
+    const candidateIsLoopback =
+      candidate.hostname === 'localhost' || candidate.hostname === '127.0.0.1';
+    const pageIsLoopback =
+      currentOrigin.hostname === 'localhost' || currentOrigin.hostname === '127.0.0.1';
+
+    target = candidateIsLoopback && !pageIsLoopback
+      ? new URL(fallbackPath, currentOrigin)
+      : candidate;
+  } catch {
+    target = new URL(fallbackPath, currentOrigin);
+  }
+
+  target.protocol = target.protocol === 'https:' ? 'wss:' : 'ws:';
+  return target.toString();
+}
+
 // ========== WebSocket 连接管理类 ==========
 
 export class VoiceInterviewWebSocket {

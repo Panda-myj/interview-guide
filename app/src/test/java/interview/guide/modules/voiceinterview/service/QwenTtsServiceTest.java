@@ -97,12 +97,46 @@ class QwenTtsServiceTest {
         assertEquals("new-tts-model", field(ttsService, "model"));
         assertEquals("new-api-key", field(ttsService, "apiKey"));
         assertEquals("Serena", field(ttsService, "voice"));
-        assertEquals("mp3", field(ttsService, "format"));
-        assertEquals(48000, field(ttsService, "sampleRate"));
+        assertEquals("pcm", field(ttsService, "format"));
+        // HTTP TTS 当前统一返回 24kHz PCM，配置的 48000 会被忽略
+        assertEquals(24000, field(ttsService, "sampleRate"));
         assertEquals("user_commit", field(ttsService, "mode"));
         assertEquals("English", field(ttsService, "languageType"));
         assertEquals(1.5f, field(ttsService, "speechRate"));
         assertEquals(80, field(ttsService, "volume"));
+    }
+
+    @Test
+    @DisplayName("非 24kHz 的采样率配置应被忽略，固定使用 24kHz 输出")
+    void testSampleRateClampedTo24k() throws Exception {
+        VoiceInterviewProperties props = new VoiceInterviewProperties();
+        props.getQwen().getTts().setApiKey("test-api-key");
+        props.getQwen().getTts().setSampleRate(16000);
+
+        QwenTtsService service = new QwenTtsService(props);
+
+        assertEquals(24000, field(service, "sampleRate"));
+    }
+
+    @Test
+    @DisplayName("旧实时模型名应自动切换到对应的 HTTP TTS 模型")
+    void testRealtimeModelNormalizedToHttpModel() throws Exception {
+        VoiceInterviewProperties props = new VoiceInterviewProperties();
+        props.getQwen().getTts().setApiKey("test-api-key");
+        props.getQwen().getTts().setModel("qwen3-tts-flash-realtime");
+
+        QwenTtsService service = new QwenTtsService(props);
+
+        assertEquals("qwen3-tts-flash", field(service, "model"));
+    }
+
+    @Test
+    @DisplayName("免费额度耗尽时应返回可操作的错误信息")
+    void testFreeTierQuotaErrorMapping() {
+        Exception exception = new IllegalStateException(
+            "403 AllocationQuota.FreeTierOnly: Free quota exhausted");
+
+        assertTrue(QwenTtsService.toUserFacingError(exception).contains("免费额度已用完"));
     }
 
     private static Object field(Object obj, String name) throws Exception {

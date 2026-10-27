@@ -10,6 +10,7 @@ import { getTemplateName } from '../utils/voiceInterview';
 import {
   voiceInterviewApi,
   connectWebSocket,
+  resolveVoiceInterviewWebSocketUrl,
   VoiceInterviewWebSocket,
 } from '../api/voiceInterview';
 
@@ -58,7 +59,6 @@ export default function VoiceInterviewPage() {
   const [aiText, setAiText] = useState('');
   const [messages, setMessages] = useState<{ role: 'user' | 'ai'; text: string; id: string }[]>([]);
   const [isAiSpeaking, setIsAiSpeaking] = useState(false);
-  const [aiAudio, setAiAudio] = useState('');
   const [sessionId, setSessionId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [templateName, setTemplateName] = useState<string>('');
@@ -70,7 +70,6 @@ export default function VoiceInterviewPage() {
   // Refs
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const wsRef = useRef<VoiceInterviewWebSocket | null>(null);
-  const audioPlayerRef = useRef<HTMLAudioElement>(null);
   const pauseTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const autoStartRef = useRef(false);
   const endedByUserRef = useRef(false);
@@ -80,13 +79,13 @@ export default function VoiceInterviewPage() {
   const aiAudioPendingRef = useRef(false);
   const lastAiCommittedTextRef = useRef('');
   const pendingAiTextCommitRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const audioPlaybackWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Chunked audio playback refs
   const audioContextRef = useRef<AudioContext | null>(null);
   const chunkQueueRef = useRef<AudioBuffer[]>([]);
   const isChunkPlayingRef = useRef(false);
   const chunkPlaybackSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const drainCheckRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const browserSpeechActiveRef = useRef(false);
+  const browserSpeechWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Ref to track latest aiText for async callbacks (avoids stale closure)
   const aiTextRef = useRef('');
   useEffect(() => { aiTextRef.current = aiText; }, [aiText]);
@@ -105,11 +104,15 @@ export default function VoiceInterviewPage() {
     }
   }, []);
 
-  const clearAudioPlaybackWatchdog = useCallback(() => {
-    if (audioPlaybackWatchdogRef.current) {
-      clearTimeout(audioPlaybackWatchdogRef.current);
-      audioPlaybackWatchdogRef.current = null;
+  const stopBrowserSpeech = useCallback(() => {
+    if (browserSpeechWatchdogRef.current) {
+      clearTimeout(browserSpeechWatchdogRef.current);
+      browserSpeechWatchdogRef.current = null;
     }
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+    browserSpeechActiveRef.current = false;
   }, []);
 
   const commitAiMessage = useCallback((rawText: string) => {
@@ -131,46 +134,53 @@ export default function VoiceInterviewPage() {
     setAiText(prev => prev?.trim() === normalized ? '' : prev);
   }, []);
 
-  const estimateWavDurationMs = useCallback((base64Wav: string) => {
-    try {
-      const binary = atob(base64Wav.slice(0, 128));
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) {
-        bytes[i] = binary.charCodeAt(i);
-      }
-      if (bytes.length < 44) {
-        return 15_000;
-      }
-      const view = new DataView(bytes.buffer);
-      const byteRate = view.getUint32(28, true);
-      const dataSize = view.getUint32(40, true);
-      if (byteRate <= 0 || dataSize <= 0) {
-        return 15_000;
-      }
-      return Math.ceil((dataSize / byteRate) * 1000);
-    } catch {
-      return 15_000;
-    }
-  }, []);
-
   const finishAiPlayback = useCallback(() => {
     aiAudioPendingRef.current = false;
-    clearAudioPlaybackWatchdog();
+    isSubmittingRef.current = false;
+    stopBrowserSpeech();
     setAiSpeaking(false);
     setIsSubmitting(false);
     clearPendingAiTextCommit();
     commitAiMessage(aiTextRef.current.trim());
     setAiText('');
-    setAiAudio('');
-  }, [clearAudioPlaybackWatchdog, clearPendingAiTextCommit, commitAiMessage, setAiSpeaking]);
+  }, [clearPendingAiTextCommit, commitAiMessage, setAiSpeaking, stopBrowserSpeech]);
 
   // --- Chunked audio playback via AudioContext ---
   const getAudioContext = useCallback(() => {
     if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
-      audioContextRef.current = new AudioContext({ sampleRate: 24000 });
+      audioContextRef.current = new AudioContext();
     }
     return audioContextRef.current;
   }, []);
+
+  const unlockAudioPlayback = useCallback(() => {
+    const ctx = getAudioContext();
+    if (ctx.state === 'suspended') {
+      void ctx.resume().catch(() => undefined);
+    }
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.getVoices();
+    }
+  }, [getAudioContext]);
+
+  const interruptAiPlaybackForInput = useCallback(() => {
+    unlockAudioPlayback();
+    if (!isAiSpeakingRef.current && !browserSpeechActiveRef.current) {
+      return;
+    }
+    if (drainCheckRef.current) {
+      clearInterval(drainCheckRef.current);
+      drainCheckRef.current = null;
+    }
+    chunkQueueRef.current = [];
+    try {
+      chunkPlaybackSourceRef.current?.stop();
+    } catch {
+      // The source may already have ended.
+    }
+    chunkPlaybackSourceRef.current = null;
+    finishAiPlayback();
+  }, [finishAiPlayback, unlockAudioPlayback]);
 
   const playNextChunk = useCallback(() => {
     if (chunkQueueRef.current.length === 0) {
@@ -180,7 +190,7 @@ export default function VoiceInterviewPage() {
     isChunkPlayingRef.current = true;
     const ctx = getAudioContext();
     if (ctx.state === 'suspended') {
-      ctx.resume();
+      void ctx.resume().catch(() => undefined);
     }
     const buffer = chunkQueueRef.current.shift()!;
     const source = ctx.createBufferSource();
@@ -220,6 +230,7 @@ export default function VoiceInterviewPage() {
 
   const handleAudioChunk = useCallback((base64Wav: string, _index: number, isLast: boolean) => {
     try {
+      stopBrowserSpeech();
       aiAudioPendingRef.current = false;
       clearPendingAiTextCommit();
       const binaryStr = atob(base64Wav);
@@ -250,8 +261,72 @@ export default function VoiceInterviewPage() {
       }
     } catch (e) {
       console.error('[ChunkAudio] Decode/play error:', e);
+      setError('面试官语音播放失败，请刷新页面后重试');
+      finishAiPlayback();
     }
-  }, [getAudioContext, playNextChunk, scheduleChunkDrainCompletion, setAiSpeaking]);
+  }, [
+    clearPendingAiTextCommit,
+    finishAiPlayback,
+    getAudioContext,
+    playNextChunk,
+    scheduleChunkDrainCompletion,
+    setAiSpeaking,
+    stopBrowserSpeech,
+  ]);
+
+  const speakWithBrowser = useCallback((rawText: string): boolean => {
+    const text = rawText.trim();
+    if (!text || !('speechSynthesis' in window) || !('SpeechSynthesisUtterance' in window)) {
+      return false;
+    }
+
+    try {
+      stopBrowserSpeech();
+      clearPendingAiTextCommit();
+      aiAudioPendingRef.current = false;
+      aiTextRef.current = text;
+      setAiText(text);
+      setIsSubmitting(true);
+      setAiSpeaking(true);
+
+      const utterance = new SpeechSynthesisUtterance(text);
+      const voices = window.speechSynthesis.getVoices();
+      const chineseVoice = voices.find(voice => voice.lang.toLowerCase().startsWith('zh'));
+      if (chineseVoice) {
+        utterance.voice = chineseVoice;
+      }
+      utterance.lang = chineseVoice?.lang || 'zh-CN';
+      utterance.rate = 1;
+      utterance.pitch = 1;
+      utterance.onend = () => {
+        if (browserSpeechActiveRef.current) {
+          finishAiPlayback();
+        }
+      };
+      utterance.onerror = event => {
+        if (event.error === 'canceled' || event.error === 'interrupted') {
+          return;
+        }
+        browserSpeechActiveRef.current = false;
+        setError('浏览器语音播放失败，请检查系统语音包或改用支持中文语音的浏览器');
+        finishAiPlayback();
+      };
+
+      browserSpeechActiveRef.current = true;
+      window.speechSynthesis.speak(utterance);
+      browserSpeechWatchdogRef.current = setTimeout(() => {
+        if (browserSpeechActiveRef.current) {
+          setError('浏览器语音播放超时，请点击页面后重试');
+          finishAiPlayback();
+        }
+      }, Math.min(120_000, Math.max(10_000, text.length * 260 + 5_000)));
+      return true;
+    } catch (browserSpeechError) {
+      console.error('[BrowserSpeech] Failed to start:', browserSpeechError);
+      browserSpeechActiveRef.current = false;
+      return false;
+    }
+  }, [clearPendingAiTextCommit, finishAiPlayback, setAiSpeaking, stopBrowserSpeech]);
 
   // Load skills for template name display
   useEffect(() => {
@@ -274,9 +349,9 @@ export default function VoiceInterviewPage() {
       if (wsRef.current) {
         wsRef.current.disconnect();
       }
-      clearAudioPlaybackWatchdog();
+      stopBrowserSpeech();
       chunkPlaybackSourceRef.current?.stop();
-      audioContextRef.current?.close();
+      void audioContextRef.current?.close().catch(() => undefined);
       if (drainCheckRef.current) {
         clearInterval(drainCheckRef.current);
         drainCheckRef.current = null;
@@ -288,7 +363,7 @@ export default function VoiceInterviewPage() {
         voiceInterviewApi.pauseSession(currentSessionId).catch(() => {});
       }
     };
-  }, [clearAudioPlaybackWatchdog, clearPendingAiTextCommit, sessionId]);
+  }, [clearPendingAiTextCommit, sessionId, stopBrowserSpeech]);
 
   // Start interview timer
   useEffect(() => {
@@ -304,19 +379,6 @@ export default function VoiceInterviewPage() {
       }
     };
   }, [sessionId, connectionStatus]);
-
-  // Auto-play audio when aiAudio changes
-  useEffect(() => {
-    if (aiAudio && audioPlayerRef.current) {
-      const playPromise = audioPlayerRef.current.play();
-      if (playPromise !== undefined) {
-        playPromise.catch(() => {
-          setError('请点击页面任意位置以启用音频播放');
-          finishAiPlayback();
-        });
-      }
-    }
-  }, [aiAudio, finishAiPlayback]);
 
   const startTimer = () => {
     timerRef.current = setInterval(() => {
@@ -388,19 +450,14 @@ export default function VoiceInterviewPage() {
       const normalized = (text || '').trim();
       if (hasAudio) {
         clearPendingAiTextCommit();
-        clearAudioPlaybackWatchdog();
         aiAudioPendingRef.current = false;
-        setAiAudio(audioData);
+        aiTextRef.current = normalized;
         setAiText(normalized);
-        setAiSpeaking(true);
-        const durationMs = estimateWavDurationMs(audioData);
-        audioPlaybackWatchdogRef.current = setTimeout(
-          finishAiPlayback,
-          Math.min(Math.max(durationMs + 1500, 4000), 60_000)
-        );
+        handleAudioChunk(audioData, 0, true);
         return;
       }
-      setAiAudio('');
+      stopBrowserSpeech();
+      aiTextRef.current = normalized;
       setAiText(normalized);
       setAiSpeaking(false);
       if (!normalized) {
@@ -421,6 +478,7 @@ export default function VoiceInterviewPage() {
         return;
       }
       aiAudioPendingRef.current = isFinal;
+      aiTextRef.current = normalized;
       setAiText(normalized);
       setAiSpeaking(true);
       if (!isFinal) {
@@ -442,13 +500,14 @@ export default function VoiceInterviewPage() {
       setConnectionStatus('disconnected');
       setIsAsrReady(false);
       clearPendingAiTextCommit();
+      stopBrowserSpeech();
       if (event.code !== 1000) {
         setError('连接已断开，请刷新页面重试');
       }
     },
     onError: () => {
       clearPendingAiTextCommit();
-      clearAudioPlaybackWatchdog();
+      stopBrowserSpeech();
       setError('WebSocket 连接错误，请检查网络后重试');
       setConnectionStatus('disconnected');
       setIsAsrReady(false);
@@ -466,6 +525,18 @@ export default function VoiceInterviewPage() {
         setIsAsrReady(false);
         if (message) {
           setError(message);
+        }
+        return;
+      }
+      if (action === 'tts_unavailable') {
+        clearPendingAiTextCommit();
+        aiAudioPendingRef.current = false;
+        const reason = message?.trim() || '服务端语音合成暂不可用';
+        if (speakWithBrowser(aiTextRef.current)) {
+          setError(`${reason}；已切换为浏览器语音`);
+        } else {
+          setError(`${reason}；当前浏览器也无法播放语音`);
+          finishAiPlayback();
         }
         return;
       }
@@ -490,14 +561,14 @@ export default function VoiceInterviewPage() {
       }
     },
   }), [
-    clearAudioPlaybackWatchdog,
     clearPendingAiTextCommit,
     commitAiMessage,
-    estimateWavDurationMs,
     finishAiPlayback,
     handleAudioChunk,
     scheduleChunkDrainCompletion,
     setAiSpeaking,
+    speakWithBrowser,
+    stopBrowserSpeech,
   ]);
 
   const connectWithHandlers = useCallback((sessionId: number, wsUrl: string) => {
@@ -543,7 +614,7 @@ export default function VoiceInterviewPage() {
       setSessionId(session.sessionId);
       setCurrentPhase(session.currentPhase);
 
-      const wsUrl = session.webSocketUrl || `ws://localhost:8080/ws/voice-interview/${session.sessionId}`;
+      const wsUrl = resolveVoiceInterviewWebSocketUrl(session.sessionId, session.webSocketUrl);
       connectWithHandlers(session.sessionId, wsUrl);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : '创建面试会话失败，请重试';
@@ -604,7 +675,7 @@ export default function VoiceInterviewPage() {
       }
       setMessages(restored);
 
-      const wsUrl = session.webSocketUrl || `ws://localhost:8080/ws/voice-interview/${session.sessionId}`;
+      const wsUrl = resolveVoiceInterviewWebSocketUrl(session.sessionId, session.webSocketUrl);
       connectWithHandlers(session.sessionId, wsUrl);
     } catch (error) {
       setError(error instanceof Error ? error.message : '恢复会话失败');
@@ -649,9 +720,6 @@ export default function VoiceInterviewPage() {
       setError('未连接到服务器，请刷新页面重试');
     }
   };
-
-  const handleSpeechStart = () => {};
-  const handleSpeechEnd = () => {};
 
   const handlePause = async (type: 'short' | 'long') => {
     if (!sessionId) return;
@@ -711,20 +779,22 @@ export default function VoiceInterviewPage() {
 
   // 提交按钮是否可用
   const canSubmit = !!userText.trim() && !isAiSpeaking && !isSubmitting && connectionStatus === 'connected';
-  const canRecord = connectionStatus === 'connected' && isAsrReady && !isAiSpeaking && !isSubmitting;
+  const canRecord = connectionStatus === 'connected'
+    && isAsrReady
+    && (!isSubmitting || isAiSpeaking);
   const recorderHint = connectionStatus !== 'connected'
     ? '正在连接服务器...'
     : !isAsrReady
       ? '语音识别准备中...'
       : isAiSpeaking
-        ? '面试官正在回答...'
+        ? '面试官正在播报，点击麦克风可打断并回答'
         : isSubmitting
           ? '正在思考...'
           : isRecording
             ? '正在聆听，说完后点击提交回答...'
             : '点击麦克风开始发言';
   const footerHint = isAiSpeaking
-    ? '面试官正在回答...'
+    ? '面试官正在播报，点击麦克风可打断并回答'
     : isSubmitting
       ? '正在思考...'
       : connectionStatus !== 'connected'
@@ -754,7 +824,7 @@ export default function VoiceInterviewPage() {
   }
 
   return (
-    <div className="pb-10">
+    <div className="pb-10" onPointerDown={unlockAudioPlayback}>
       <div className="max-w-7xl mx-auto">
         <InterviewPageHeader
           title="语音模拟面试"
@@ -853,6 +923,22 @@ export default function VoiceInterviewPage() {
             </div>
 
             <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-100 dark:border-slate-700 shadow-sm p-5">
+              <label
+                htmlFor="voice-answer"
+                className="mb-2 block text-sm font-medium text-slate-700 dark:text-slate-300"
+              >
+                回答文本（语音识别后可编辑，也可直接输入）
+              </label>
+              <textarea
+                id="voice-answer"
+                value={userText}
+                onChange={event => setUserText(event.target.value)}
+                onFocus={interruptAiPlaybackForInput}
+                placeholder="点击麦克风开始说话，识别结果会显示在这里；也可以直接输入回答。"
+                rows={3}
+                className="mb-4 w-full resize-y rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-800 outline-none transition focus:border-primary-400 focus:ring-2 focus:ring-primary-100 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-100 dark:focus:ring-primary-900/40"
+              />
+
               <div className="flex items-center justify-center gap-6">
                 <button
                   onClick={() => {
@@ -871,8 +957,8 @@ export default function VoiceInterviewPage() {
                   disabled={!isRecording && !canRecord}
                   onRecordingChange={setIsRecording}
                   onAudioData={handleAudioData}
-                  onSpeechStart={handleSpeechStart}
-                  onSpeechEnd={handleSpeechEnd}
+                  onError={setError}
+                  onInteraction={interruptAiPlaybackForInput}
                 />
 
                 <button
@@ -920,18 +1006,6 @@ export default function VoiceInterviewPage() {
         </div>
       </div>
 
-      {aiAudio && (
-        <audio
-          ref={audioPlayerRef}
-          src={`data:audio/wav;base64,${aiAudio}`}
-          onEnded={() => {
-            finishAiPlayback();
-          }}
-          onPlay={() => setAiSpeaking(true)}
-          autoPlay
-          style={{ display: 'none' }}
-        />
-      )}
     </div>
   );
 }

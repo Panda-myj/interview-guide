@@ -1,0 +1,68 @@
+# ==============================================================================
+# 生产环境配置
+# ------------------------------------------------------------------------------
+# 激活方式：设置环境变量 SPRING_PROFILES_ACTIVE=prod
+# 本文件只覆盖“生产安全”相关项，其余配置继承 application.yml 并通过环境变量注入。
+# 覆盖原则：
+#   1. 关闭开发期便利功能（自动建表、自动建向量表、SQL 打印）
+#   2. 收紧对外暴露（CORS 白名单、Actuator 端点、健康详情）
+#   3. 补齐反向代理与文件日志
+# ==============================================================================
+
+server:
+  # 部署在 Nginx 等反向代理后，读取 X-Forwarded-* 头以还原真实协议 / IP
+  forward-headers-strategy: framework
+
+spring:
+  jpa:
+    hibernate:
+      # 生产不自动改表结构，schema 由运维或迁移脚本管理，应用只做校验。
+      # 首次部署空库时：临时设置 JPA_DDL_AUTO=update 建表，完成后务必改回 validate。
+      ddl-auto: ${JPA_DDL_AUTO:validate}
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: false
+
+  ai:
+    vectorstore:
+      pgvector:
+        # 生产不自动创建 / 变更 vector_store 表。
+        # 首次部署空库时：临时设置 PGVECTOR_INIT_SCHEMA=true，完成后改回 false。
+        initialize-schema: ${PGVECTOR_INIT_SCHEMA:false}
+
+app:
+  # 生产 CORS 白名单：请改成真实访问域名，多个用英文逗号分隔。
+  # 默认覆盖本地容器化部署入口（http://localhost），避免误放行开发端口 5173/5174。
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost,http://127.0.0.1}
+  ai:
+    security:
+      # 生产必须提供加密密钥，且禁止回退到内置默认密钥
+      require-encryption-key: true
+      allow-fallback-encryption-key: false
+
+# 生产日志：输出到文件并滚动，避免仅依赖标准输出
+logging:
+  level:
+    root: ${LOG_LEVEL_ROOT:INFO}
+  file:
+    name: ${LOG_FILE:logs/app.log}
+  logback:
+    rollingpolicy:
+      max-file-size: ${LOG_MAX_FILE_SIZE:50MB}
+      max-history: ${LOG_MAX_HISTORY:14}
+      total-size-cap: ${LOG_TOTAL_SIZE_CAP:2GB}
+
+# 生产默认只暴露健康检查端点；需要 Prometheus 抓取时设置
+# ACTUATOR_ENDPOINTS=health,info,metrics,prometheus
+management:
+  endpoints:
+    web:
+      exposure:
+        include: ${ACTUATOR_ENDPOINTS:health,info}
+  endpoint:
+    health:
+      show-details: never
+      probes:
+        enabled: true

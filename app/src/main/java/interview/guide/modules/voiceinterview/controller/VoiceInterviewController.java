@@ -14,6 +14,7 @@ import interview.guide.modules.voiceinterview.dto.VoiceInterviewMessageDTO;
 import interview.guide.modules.voiceinterview.model.VoiceInterviewSessionEntity;
 import interview.guide.modules.voiceinterview.service.VoiceInterviewEvaluationService;
 import interview.guide.modules.voiceinterview.service.VoiceInterviewService;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -44,6 +45,7 @@ import java.util.Map;
 @RequestMapping("/api/voice-interview")
 @RequiredArgsConstructor
 @Slf4j
+@Tag(name = "语音面试", description = "语音面试")
 public class VoiceInterviewController {
 
     private final VoiceInterviewService voiceInterviewService;

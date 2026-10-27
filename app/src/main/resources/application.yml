@@ -245,15 +245,17 @@ app:
         # 静音多久判为一句结束；中文面试思考停顿常见 2-3s，设 2000 避免句中切段
         turn-detection-silence-duration-ms: ${APP_VOICE_ASR_SILENCE_MS:2000}
 
-      # Qwen TTS Realtime Configuration (WebSocket-based)
-      # 音色列表文档：https://help.aliyun.com/zh/model-studio/qwen-tts-realtime
+      # Qwen HTTP TTS Configuration
+      # 音色列表文档：https://help.aliyun.com/zh/model-studio/qwen-tts
       tts:
-        model: qwen3-tts-flash-realtime
+        model: ${APP_VOICE_TTS_MODEL:qwen3-tts-flash}
+        # 旧版实时协议配置，仅保留兼容；HTTP TTS 不使用该地址。
+        url: ${APP_VOICE_TTS_URL:wss://dashscope.aliyuncs.com/api-ws/v1/realtime}
         api-key: ${AI_BAILIAN_API_KEY}
         voice: Cherry
         format: pcm
         sample-rate: 24000
-        mode: commit
+        mode: http
         language-type: Chinese
         speech-rate: 1.0
         volume: 60
