@@ -7,6 +7,7 @@ import type {InterviewItem} from '../api/history';
 import {historyApi} from '../api/history';
 import ConfirmDialog from './ConfirmDialog';
 import {Calendar, ChevronRight, Download, MessageSquare, Mic, Trash2, TrendingUp} from 'lucide-react';
+import { useToast } from './Toast';
 
 interface InterviewPanelProps {
   interviews: InterviewItem[];
@@ -30,6 +31,7 @@ export default function InterviewPanel({
   exporting,
   loadingInterview
 }: InterviewPanelProps) {
+  const toast = useToast();
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<{ sessionId: string } | null>(null);
 
@@ -48,7 +50,7 @@ export default function InterviewPanel({
       onDeleteInterview(sessionId);
       setDeleteConfirm(null);
     } catch (err) {
-      alert(err instanceof Error ? err.message : '删除失败，请稍后重试');
+      toast.error(err instanceof Error ? err.message : '删除失败，请稍后重试');
     } finally {
       setDeletingSessionId(null);
     }

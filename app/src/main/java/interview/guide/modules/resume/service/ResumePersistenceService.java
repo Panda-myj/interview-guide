@@ -5,12 +5,15 @@ import interview.guide.common.exception.ErrorCode;
 import interview.guide.infrastructure.file.FileHashService;
 import interview.guide.infrastructure.mapper.ResumeMapper;
 import interview.guide.modules.interview.model.ResumeAnalysisResponse;
+import interview.guide.modules.auth.model.UserEntity;
+import interview.guide.modules.auth.security.CurrentUserService;
 import interview.guide.modules.resume.model.ResumeAnalysisEntity;
 import interview.guide.modules.resume.model.ResumeEntity;
 import interview.guide.modules.resume.repository.ResumeAnalysisRepository;
 import interview.guide.modules.resume.repository.ResumeRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
@@ -19,7 +22,10 @@ import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.ObjectMapper;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
  * 简历持久化服务
@@ -35,6 +41,7 @@ public class ResumePersistenceService {
     private final ObjectMapper objectMapper;
     private final ResumeMapper resumeMapper;
     private final FileHashService fileHashService;
+    private final CurrentUserService currentUserService;
     
     /**
      * 检查简历是否已存在（基于文件内容hash）
@@ -45,7 +52,8 @@ public class ResumePersistenceService {
     public Optional<ResumeEntity> findExistingResume(MultipartFile file) {
         try {
             String fileHash = fileHashService.calculateHash(file);
-            Optional<ResumeEntity> existing = resumeRepository.findByFileHash(fileHash);
+            Optional<ResumeEntity> existing = resumeRepository.findByOwnerUserIdAndFileHash(
+                currentUserService.getRequiredUserId(), fileHash);
             
             if (existing.isPresent()) {
                 log.info("检测到重复简历: hash={}", fileHash);
@@ -56,7 +64,9 @@ public class ResumePersistenceService {
             
             return existing;
         } catch (Exception e) {
-            log.error("检查简历重复时出错: {}", e.getMessage());
+            // 去重是上传链路里的可选优化：失败时降级为“非重复”，不影响上传主流程，
+            // 但必须保留异常堆栈与文件上下文，否则重复简历问题无法定位
+            log.error("检查简历重复失败，按非重复处理: originalFilename={}", file.getOriginalFilename(), e);
             return Optional.empty();
         }
     }
@@ -71,6 +81,7 @@ public class ResumePersistenceService {
             String fileHash = fileHashService.calculateHash(file);
             
             ResumeEntity resume = new ResumeEntity();
+            resume.setOwnerUser(currentUserService.getRequiredUser());
             resume.setFileHash(fileHash);
             resume.setOriginalFilename(file.getOriginalFilename());
             resume.setFileSize(file.getSize());
@@ -84,8 +95,9 @@ public class ResumePersistenceService {
             
             return saved;
         } catch (Exception e) {
-            log.error("保存简历失败: {}", e.getMessage(), e);
-            throw new BusinessException(ErrorCode.RESUME_UPLOAD_FAILED, "保存简历失败");
+            log.error("保存简历失败: originalFilename={}", file.getOriginalFilename(), e);
+            // 保留根因，便于上层区分数据库失败与序列化失败
+            throw new BusinessException(ErrorCode.RESUME_UPLOAD_FAILED, "保存简历失败", e);
         }
     }
     
@@ -132,7 +144,43 @@ public class ResumePersistenceService {
      * 获取所有简历列表
      */
     public List<ResumeEntity> findAllResumes() {
-        return resumeRepository.findAll();
+        return resumeRepository.findAllByOwnerUserIdOrderByUploadedAtDesc(
+            currentUserService.getRequiredUserId());
+    }
+
+    /**
+     * 分页获取简历列表（列表页用，上限由调用方控制，PERF-002）。
+     */
+    public List<ResumeEntity> findAllResumes(Pageable pageable) {
+        return resumeRepository.findAllByOwnerUserIdOrderByUploadedAtDesc(
+            currentUserService.getRequiredUserId(), pageable);
+    }
+
+    /**
+     * 批量获取多份简历的最新评测记录（每份简历 analyzedAt 最大的一条，PERF-002）。
+     */
+    public Map<Long, ResumeAnalysisEntity> findLatestAnalysesByResumeIds(List<Long> resumeIds) {
+        if (resumeIds == null || resumeIds.isEmpty()) {
+            return Map.of();
+        }
+        return analysisRepository.findByResumeIdsOrderByAnalyzedAtDesc(resumeIds).stream()
+            .collect(Collectors.toMap(
+                a -> a.getResume().getId(),
+                Function.identity(),
+                // 已按 analyzedAt 倒序，首个即最新
+                (first, ignored) -> first
+            ));
+    }
+
+    /**
+     * 批量统计各简历的评测次数（PERF-002）。
+     */
+    public Map<Long, Long> countAnalysesByResumeIds(List<Long> resumeIds) {
+        if (resumeIds == null || resumeIds.isEmpty()) {
+            return Map.of();
+        }
+        return analysisRepository.countByResumeIds(resumeIds).stream()
+            .collect(Collectors.toMap(row -> (Long) row[0], row -> (Long) row[1]));
     }
     
     /**
@@ -177,7 +225,13 @@ public class ResumePersistenceService {
      * 根据ID获取简历
      */
     public Optional<ResumeEntity> findById(Long id) {
-        return resumeRepository.findById(id);
+        return resumeRepository.findByIdAndOwnerUserId(id, currentUserService.getRequiredUserId());
+    }
+
+    public void ensureOwned(Long id) {
+        if (findById(id).isEmpty()) {
+            throw new BusinessException(ErrorCode.RESUME_NOT_FOUND);
+        }
     }
     
     /**
@@ -186,7 +240,8 @@ public class ResumePersistenceService {
      */
     @Transactional(rollbackFor = Exception.class)
     public void deleteResume(Long id) {
-        Optional<ResumeEntity> resumeOpt = resumeRepository.findById(id);
+        Optional<ResumeEntity> resumeOpt = resumeRepository.findByIdAndOwnerUserId(
+            id, currentUserService.getRequiredUserId());
         if (resumeOpt.isEmpty()) {
             throw new BusinessException(ErrorCode.RESUME_NOT_FOUND);
         }

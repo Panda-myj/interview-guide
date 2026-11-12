@@ -3,6 +3,7 @@ package interview.guide.common.ai;
 import interview.guide.common.config.LlmProviderProperties;
 import interview.guide.common.config.LlmProviderProperties.ProviderConfig;
 import interview.guide.common.exception.BusinessException;
+import interview.guide.common.exception.ErrorCode;
 import io.micrometer.observation.ObservationRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -115,13 +116,15 @@ class LlmProviderRegistryTest {
     }
 
     @Test
-    @DisplayName("Throw exception for unknown provider")
+    @DisplayName("未知 Provider 抛出业务异常并提示配置问题")
     void testGetChatClient_UnknownProvider() {
         // Given
         when(properties.getProviders()).thenReturn(new HashMap<>());
 
         // When & Then
-        assertThrows(IllegalArgumentException.class, () -> registry.getChatClient("unknown"));
+        BusinessException exception = assertThrows(BusinessException.class,
+            () -> registry.getChatClient("unknown"));
+        assertEquals(ErrorCode.PROVIDER_CONFIG_READ_FAILED.getCode(), exception.getCode());
     }
 
     @Test

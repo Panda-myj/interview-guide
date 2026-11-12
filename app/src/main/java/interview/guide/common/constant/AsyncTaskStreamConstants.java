@@ -141,4 +141,10 @@ public final class AsyncTaskStreamConstants {
      * 语音面试会话ID字段
      */
     public static final String FIELD_VOICE_SESSION_ID = "voiceSessionId";
+
+    // ========== 登录提醒 Stream 配置 ==========
+    public static final String LOGIN_NOTIFICATION_STREAM_KEY = "auth:login-notification:stream";
+    public static final String LOGIN_NOTIFICATION_GROUP_NAME = "login-notification-group";
+    public static final String LOGIN_NOTIFICATION_CONSUMER_PREFIX = "login-notification-consumer-";
+    public static final String FIELD_NOTIFICATION_ID = "notificationId";
 }

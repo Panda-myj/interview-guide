@@ -1,9 +1,11 @@
 import {Link, Outlet, useLocation, useNavigate} from 'react-router-dom';
 import {motion} from 'framer-motion';
-import {Calendar, ChevronRight, Database, FileStack, MessageSquare, Moon, Settings, Sparkles, Sun, Users,} from 'lucide-react';
+import {Calendar, ChevronRight, Database, FileStack, LogOut, MessageSquare, Moon, Settings, ShieldCheck, Sparkles, Sun, UserRound, Users,} from 'lucide-react';
 import {useTheme} from '../hooks/useTheme';
 import {useState} from 'react';
 import UnifiedInterviewModal, {UnifiedInterviewConfig} from './UnifiedInterviewModal';
+import {useAuth} from '../auth/AuthProvider';
+import {ROUTES, isNavItemActive} from '../constants/routes';
 
 interface NavItem {
   id: string;
@@ -31,6 +33,7 @@ export default function Layout() {
     subtitle: string;
     startButtonText: string;
   } | null>(null);
+  const {user, isAdmin, logout} = useAuth();
 
   const openInterviewModalWithResume = (resumeId: number) => {
     setInterviewModalPreset({
@@ -45,7 +48,7 @@ export default function Layout() {
   const handleInterviewStart = (config: UnifiedInterviewConfig) => {
     setInterviewModalPreset(null);
     if (config.mode === 'text') {
-      navigate('/interview', {
+      navigate(ROUTES.interview, {
         state: {
           resumeId: config.resumeId,
           interviewConfig: {
@@ -63,7 +66,7 @@ export default function Layout() {
       skillId: config.skillId,
       difficulty: config.difficulty,
     });
-    navigate(`/voice-interview?${params.toString()}`, {
+    navigate(`${ROUTES.voiceInterview}?${params.toString()}`, {
       state: {
         voiceConfig: {
           skillId: config.skillId,
@@ -85,49 +88,31 @@ export default function Layout() {
       id: 'interview',
       title: '面试准备',
       items: [
-        { id: 'resumes', path: '/history', label: '简历管理', icon: FileStack, description: '管理简历，AI 分析' },
-        { id: 'interview-hub', path: '/interview-hub', label: '模拟面试', icon: Sparkles, description: '文字/语音面试练习' },
-        { id: 'interviews', path: '/interviews', label: '面试记录', icon: Users, description: '查看面试历史' },
-        { id: 'interview-schedule', path: '/interview-schedule', label: '面试日程', icon: Calendar, description: '管理面试安排' },
+        { id: 'resumes', path: ROUTES.resumeHistory, label: '简历管理', icon: FileStack, description: '管理简历，AI 分析' },
+        { id: 'interview-hub', path: ROUTES.interviewHub, label: '模拟面试', icon: Sparkles, description: '文字/语音面试练习' },
+        { id: 'interviews', path: ROUTES.interviewHistory, label: '面试记录', icon: Users, description: '查看面试历史' },
+        { id: 'interview-schedule', path: ROUTES.interviewSchedule, label: '面试日程', icon: Calendar, description: '管理面试安排' },
       ],
     },
     {
       id: 'knowledge',
       title: '知识库',
       items: [
-        { id: 'kb-manage', path: '/knowledgebase', label: '知识库管理', icon: Database, description: '管理知识文档' },
-        { id: 'chat', path: '/knowledgebase/chat', label: '问答助手', icon: MessageSquare, description: '基于知识库问答' },
+        { id: 'kb-manage', path: ROUTES.knowledgebase, label: '知识库管理', icon: Database, description: '管理知识文档' },
+        { id: 'chat', path: ROUTES.knowledgebaseChat, label: '问答助手', icon: MessageSquare, description: '基于知识库问答' },
       ],
     },
-    {
+    ...(isAdmin ? [{
       id: 'system',
       title: '系统',
       items: [
-        { id: 'settings', path: '/settings', label: '设置', icon: Settings, description: '管理模型和语音服务' },
+        { id: 'settings', path: ROUTES.settings, label: '设置', icon: Settings, description: '管理模型和语音服务' },
       ],
-    },
+    }] : []),
   ];
 
-  // 判断当前页面是否匹配导航项
-  const isActive = (path: string) => {
-    if (path.startsWith('#')) return false;
-    if (path === '/history') {
-      return currentPath === '/history'
-        || currentPath === '/'
-        || currentPath.startsWith('/history/')
-        || currentPath === '/upload';
-    }
-    if (path === '/interview-hub') {
-      return currentPath === '/interview-hub'
-        || currentPath === '/interview'
-        || currentPath.startsWith('/interview/')
-        || currentPath.startsWith('/voice-interview');
-    }
-    if (path === '/knowledgebase') {
-      return currentPath === '/knowledgebase' || currentPath === '/knowledgebase/upload';
-    }
-    return currentPath.startsWith(path);
-  };
+  // 分组归属集中在 constants/routes.ts，Layout 只做调用
+  const isActive = (path: string) => isNavItemActive(path, currentPath);
 
   return (
     <div className="flex min-h-screen bg-gradient-to-br from-slate-50 to-indigo-50 dark:from-slate-900 dark:to-slate-800">
@@ -135,7 +120,7 @@ export default function Layout() {
       <aside className="w-64 bg-white dark:bg-slate-900 border-r border-slate-100 dark:border-slate-700 fixed h-screen left-0 top-0 z-50 flex flex-col">
         {/* Logo */}
         <div className="p-6 border-b border-slate-100 dark:border-slate-700 flex items-center justify-between">
-          <Link to="/history" className="flex items-center gap-3">
+          <Link to={ROUTES.resumeHistory} className="flex items-center gap-3">
             <div className="w-10 h-10 bg-gradient-to-br from-primary-500 to-primary-600 rounded-xl flex items-center justify-center text-white shadow-lg shadow-primary-500/30">
               <Sparkles className="w-5 h-5" />
             </div>
@@ -220,6 +205,38 @@ export default function Layout() {
 
         {/* 底部信息 */}
         <div className="p-4 border-t border-slate-100 dark:border-slate-700">
+          <div className="mb-3 flex items-center gap-3 rounded-xl bg-slate-50 p-3 dark:bg-slate-800/80">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary-100 text-primary-600 dark:bg-primary-900/50 dark:text-primary-300">
+              <UserRound className="h-4 w-4" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-semibold text-slate-800 dark:text-white">
+                {user?.displayName}
+              </p>
+              <p className="truncate text-xs text-slate-400">
+                {user?.maskedPhone}{isAdmin ? ' · 管理员' : ''}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => navigate(ROUTES.account)}
+              className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-primary-50 hover:text-primary-600 dark:hover:bg-primary-950/30"
+              title="账号与安全"
+            >
+              <ShieldCheck className="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                await logout();
+                navigate(ROUTES.login, {replace: true});
+              }}
+              className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-950/30"
+              title="退出登录"
+            >
+              <LogOut className="h-4 w-4" />
+            </button>
+          </div>
           <div className="px-3 py-2 bg-gradient-to-r from-primary-50 to-indigo-50 dark:from-primary-900/30 dark:to-slate-800 rounded-xl">
             <p className="text-xs text-primary-600 dark:text-primary-400 font-medium">AI 面试助手 v1.0</p>
             <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">Powered by AI</p>

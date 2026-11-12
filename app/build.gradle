@@ -5,6 +5,9 @@
 
 plugins {
     id 'java'
+    // QA-001：覆盖率基线。只生成报告并打印摘要，不设通过门槛，
+    // 避免为了“达标”去删测试或改口径；门槛在基线稳定后再单独讨论。
+    id 'jacoco'
     alias(libs.plugins.spring.boot)
     alias(libs.plugins.spring.dependency.management)
 }
@@ -27,6 +30,12 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-validation'
     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
     implementation 'org.springframework.boot:spring-boot-starter-websocket'
+    implementation 'org.springframework.boot:spring-boot-starter-security'
+    implementation 'org.springframework.boot:spring-boot-starter-oauth2-resource-server'
+
+    // Versioned database migrations
+    implementation 'org.springframework.boot:spring-boot-starter-flyway'
+    implementation 'org.flywaydb:flyway-database-postgresql'
 
     // PostgreSQL
     runtimeOnly 'org.postgresql:postgresql'
@@ -71,6 +80,9 @@ dependencies {
     implementation('com.alibaba:dashscope-sdk-java:2.23.3') {
         exclude group: 'org.slf4j', module: 'slf4j-simple' // 使用 Spring Boot 的 Logback
     }
+    implementation libs.aliyun.sms
+    // 号码认证服务（短信认证）：个人实名主体可用，预置签名与模板，支持自定义验证码
+    implementation libs.aliyun.pnvs
 
     // Jakarta annotation for Java 21+ (replaces javax.annotation)
     implementation 'jakarta.annotation:jakarta.annotation-api:2.1.1'
@@ -86,6 +98,8 @@ dependencies {
 
     // Testing
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'org.springframework.boot:spring-boot-starter-data-jpa-test'
+    testImplementation 'org.springframework.security:spring-security-test'
     testImplementation libs.junit.jupiter
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
@@ -101,8 +115,64 @@ tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }
 
+jacoco {
+    // 0.8.12 起完整支持 Java 21/22 字节码；项目 toolchain 为 21
+    toolVersion = '0.8.12'
+}
+
 tasks.named('test') {
     useJUnitPlatform()
+    // 测试结束后自动产出覆盖率报告，不需要额外记住一条命令
+    finalizedBy 'jacocoTestReport'
+}
+
+tasks.named('jacocoTestReport') {
+    dependsOn 'test'
+    reports {
+        xml.required = true
+        html.required = true
+        csv.required = false
+    }
+    doLast {
+        // 打印基线摘要，方便直接把数字写进 TODO.md 的证据栏。
+        // 统计口径为原始字节码覆盖，未排除 MapStruct 生成类与配置类。
+        def reportFile = layout.buildDirectory.file('reports/jacoco/test/jacocoTestReport.xml').get().asFile
+        if (!reportFile.exists()) {
+            logger.lifecycle('[coverage] 未找到 jacoco XML 报告，跳过摘要输出')
+            return
+        }
+        // JaCoCo 报告自带 DOCTYPE，Groovy 默认的安全解析器会直接拒绝；
+        // 这里关闭外部实体解析（报告是本地产物，不需要任何外部 DTD 内容）。
+        def factory = javax.xml.parsers.DocumentBuilderFactory.newInstance()
+        factory.setFeature('http://apache.org/xml/features/disallow-doctype-decl', false)
+        factory.setFeature('http://xml.org/sax/features/external-general-entities', false)
+        factory.setFeature('http://xml.org/sax/features/external-parameter-entities', false)
+        factory.setExpandEntityReferences(false)
+        def builder = factory.newDocumentBuilder()
+        // 空 DTD：报告里只有 DOCTYPE 声明，没有任何需要展开的实体
+        builder.setEntityResolver({ publicId, systemId ->
+            new org.xml.sax.InputSource(new java.io.StringReader(''))
+        } as org.xml.sax.EntityResolver)
+        def document = builder.parse(reportFile)
+        def counters = document.getElementsByTagName('counter')
+        def wanted = ['INSTRUCTION', 'BRANCH', 'LINE', 'METHOD', 'CLASS'] as Set
+        for (int i = 0; i < counters.length; i++) {
+            def counter = counters.item(i)
+            if (counter.parentNode?.nodeName != 'report') {
+                continue // 只取 report 级别的汇总计数，跳过每个 class 的明细
+            }
+            def type = counter.getAttribute('type')
+            if (!wanted.contains(type)) {
+                continue
+            }
+            def covered = counter.getAttribute('covered') as int
+            def missed = counter.getAttribute('missed') as int
+            def total = covered + missed
+            def percent = total == 0 ? 0.0d : (covered * 100.0d / total)
+            logger.lifecycle(String.format('[coverage] %-11s %6.2f%%  covered=%d missed=%d',
+                    type, percent, covered, total))
+        }
+    }
 }
 
 // 将仓库根目录 .env 注入 bootRun，便于本地加载 AI_BAILIAN_API_KEY 等变量（Gradle 进程默认不读 .env）

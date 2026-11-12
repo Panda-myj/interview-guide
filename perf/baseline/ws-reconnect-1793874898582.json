@@ -1,0 +1,134 @@
+{
+  "startedAt": "2026-11-05T10:34:28.292Z",
+  "concurrency": 10,
+  "dropRate": 0.2,
+  "sessions": [
+    {
+      "sessionId": "17",
+      "connected": true,
+      "reconnects": 0,
+      "framesSent": 2,
+      "framesDropped": 50,
+      "firstReplyLatencyMs": 292,
+      "recoveries": [],
+      "errors": [],
+      "finalState": "control"
+    },
+    {
+      "sessionId": "19",
+      "connected": true,
+      "reconnects": 0,
+      "framesSent": 2,
+      "framesDropped": 48,
+      "firstReplyLatencyMs": 291,
+      "recoveries": [],
+      "errors": [],
+      "finalState": "control"
+    },
+    {
+      "sessionId": "14",
+      "connected": true,
+      "reconnects": 0,
+      "framesSent": 1,
+      "framesDropped": 65,
+      "firstReplyLatencyMs": 293,
+      "recoveries": [],
+      "errors": [],
+      "finalState": "control"
+    },
+    {
+      "sessionId": "20",
+      "connected": true,
+      "reconnects": 0,
+      "framesSent": 2,
+      "framesDropped": 53,
+      "firstReplyLatencyMs": 291,
+      "recoveries": [],
+      "errors": [],
+      "finalState": "control"
+    },
+    {
+      "sessionId": "22",
+      "connected": true,
+      "reconnects": 0,
+      "framesSent": 2,
+      "framesDropped": 47,
+      "firstReplyLatencyMs": 290,
+      "recoveries": [],
+      "errors": [],
+      "finalState": "control"
+    },
+    {
+      "sessionId": "15",
+      "connected": true,
+      "reconnects": 0,
+      "framesSent": 2,
+      "framesDropped": 57,
+      "firstReplyLatencyMs": 292,
+      "recoveries": [],
+      "errors": [],
+      "finalState": "control"
+    },
+    {
+      "sessionId": "13",
+      "connected": true,
+      "reconnects": 0,
+      "framesSent": 1,
+      "framesDropped": 46,
+      "firstReplyLatencyMs": 313,
+      "recoveries": [],
+      "errors": [],
+      "finalState": "control"
+    },
+    {
+      "sessionId": "16",
+      "connected": true,
+      "reconnects": 0,
+      "framesSent": 2,
+      "framesDropped": 56,
+      "firstReplyLatencyMs": 292,
+      "recoveries": [],
+      "errors": [],
+      "finalState": "control"
+    },
+    {
+      "sessionId": "21",
+      "connected": true,
+      "reconnects": 0,
+      "framesSent": 2,
+      "framesDropped": 51,
+      "firstReplyLatencyMs": 291,
+      "recoveries": [],
+      "errors": [],
+      "finalState": "control"
+    },
+    {
+      "sessionId": "18",
+      "connected": true,
+      "reconnects": 0,
+      "framesSent": 2,
+      "framesDropped": 56,
+      "firstReplyLatencyMs": 291,
+      "recoveries": [],
+      "errors": [],
+      "finalState": "control"
+    }
+  ],
+  "summary": {
+    "sessions": 10,
+    "connected": 10,
+    "totalReconnects": 0,
+    "successfulReconnects": 0,
+    "framesSent": 18,
+    "framesDropped": 529,
+    "firstReplyLatencyP50": 292,
+    "firstReplyLatencyP95": 313,
+    "firstReplyLatencyMax": 313,
+    "target": {
+      "concurrency": 10,
+      "endToEndLatencyMs": 2000,
+      "dropRate": 0.2
+    }
+  },
+  "finishedAt": "2026-11-05T10:34:58.582Z"
+}

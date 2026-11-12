@@ -5,6 +5,7 @@ import interview.guide.common.exception.ErrorCode;
 import interview.guide.modules.knowledgebase.model.KnowledgeBaseEntity;
 import interview.guide.modules.knowledgebase.model.VectorStatus;
 import interview.guide.modules.knowledgebase.repository.KnowledgeBaseRepository;
+import interview.guide.modules.auth.security.CurrentUserService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -23,6 +24,7 @@ import java.util.Map;
 public class KnowledgeBasePersistenceService {
 
     private final KnowledgeBaseRepository knowledgeBaseRepository;
+    private final CurrentUserService currentUserService;
 
     /**
      * 处理重复知识库（更新访问计数）
@@ -59,6 +61,7 @@ public class KnowledgeBasePersistenceService {
                                                   String storageKey, String storageUrl, String fileHash) {
         try {
             KnowledgeBaseEntity kb = new KnowledgeBaseEntity();
+            kb.setOwnerUser(currentUserService.getRequiredUser());
             kb.setFileHash(fileHash);
             kb.setName(name != null && !name.trim().isEmpty() ? name : extractNameFromFilename(file.getOriginalFilename()));
             kb.setCategory(category != null && !category.trim().isEmpty() ? category.trim() : null);
@@ -82,7 +85,9 @@ public class KnowledgeBasePersistenceService {
      */
     @Transactional(rollbackFor = Exception.class)
     public void updateVectorStatusToPending(Long kbId) {
-        KnowledgeBaseEntity kb = knowledgeBaseRepository.findById(kbId)
+        // 带属主条件：该方法由用户触发的“重新向量化”调用，不能跨租户改写状态
+        KnowledgeBaseEntity kb = knowledgeBaseRepository
+            .findByIdAndOwnerUserId(kbId, currentUserService.getRequiredUserId())
             .orElseThrow(() -> new BusinessException(ErrorCode.NOT_FOUND, "知识库不存在"));
         
         kb.setVectorStatus(VectorStatus.PENDING);

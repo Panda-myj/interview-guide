@@ -83,15 +83,17 @@ public class InterviewScheduleController {
      * @param status 状态过滤（可选）
      * @param start 开始时间（可选）
      * @param end 结束时间（可选）
+     * @param size 返回条数上限（默认 50，最大 200；保持 List 契约，后续演进为 Page）
      * @return 面试记录列表
      */
     @GetMapping
     public Result<List<InterviewScheduleDTO>> getAll(
         @RequestParam(required = false) String status,
         @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime start,
-        @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime end
+        @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime end,
+        @RequestParam(defaultValue = "50") int size
     ) {
-        List<InterviewScheduleDTO> list = scheduleService.getAll(status, start, end);
+        List<InterviewScheduleDTO> list = scheduleService.getAll(status, start, end, size);
         return Result.success(list);
     }
 

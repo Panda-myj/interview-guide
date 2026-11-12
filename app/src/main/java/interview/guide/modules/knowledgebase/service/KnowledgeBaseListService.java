@@ -11,13 +11,17 @@ import interview.guide.modules.knowledgebase.model.RagChatMessageEntity.MessageT
 import interview.guide.modules.knowledgebase.model.VectorStatus;
 import interview.guide.modules.knowledgebase.repository.KnowledgeBaseRepository;
 import interview.guide.modules.knowledgebase.repository.RagChatMessageRepository;
+import interview.guide.modules.auth.security.CurrentUserService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 /**
  * 知识库查询服务
@@ -32,31 +36,35 @@ public class KnowledgeBaseListService {
     private final RagChatMessageRepository ragChatMessageRepository;
     private final KnowledgeBaseMapper knowledgeBaseMapper;
     private final FileStorageService fileStorageService;
+    private final CurrentUserService currentUserService;
 
     /**
-     * 获取知识库列表（支持状态过滤和排序）
-     * 
+     * 获取知识库列表（支持状态过滤和排序，排序下推数据库，PERF-002）
+     *
      * @param vectorStatus 向量化状态，null 表示不过滤
      * @param sortBy 排序字段，null 或 "time" 表示按时间排序
      * @return 知识库列表
      */
     public List<KnowledgeBaseListItemDTO> listKnowledgeBases(VectorStatus vectorStatus, String sortBy) {
-        List<KnowledgeBaseEntity> entities;
-        
-        // 如果指定了状态，按状态过滤
-        if (vectorStatus != null) {
-            entities = knowledgeBaseRepository.findByVectorStatusOrderByUploadedAtDesc(vectorStatus);
-        } else {
-            // 否则获取所有知识库
-            entities = knowledgeBaseRepository.findAllByOrderByUploadedAtDesc();
-        }
-        
-        // 如果指定了排序字段，在内存中排序
-        if (sortBy != null && !sortBy.isBlank() && !sortBy.equalsIgnoreCase("time")) {
-            entities = sortEntities(entities, sortBy);
-        }
-        
-        return knowledgeBaseMapper.toListItemDTOList(entities);
+        Long ownerUserId = currentUserService.getRequiredUserId();
+        return knowledgeBaseMapper.toListItemDTOList(
+            knowledgeBaseRepository.findByOwnerUserIdAndVectorStatus(
+                ownerUserId, vectorStatus, resolveSort(sortBy))
+        );
+    }
+
+    /**
+     * 解析排序字段为数据库 ORDER BY（排序下推，PERF-002）。
+     * 未知字段回退到 uploadedAt，与旧行为一致。
+     */
+    private Sort resolveSort(String sortBy) {
+        String field = sortBy == null || sortBy.isBlank() ? "time" : sortBy.toLowerCase();
+        return switch (field) {
+            case "size" -> Sort.by(Sort.Direction.DESC, "fileSize");
+            case "access" -> Sort.by(Sort.Direction.DESC, "accessCount");
+            case "question" -> Sort.by(Sort.Direction.DESC, "questionCount");
+            default -> Sort.by(Sort.Direction.DESC, "uploadedAt");
+        };
     }
 
     /**
@@ -77,7 +85,7 @@ public class KnowledgeBaseListService {
      * 根据ID获取知识库详情
      */
     public Optional<KnowledgeBaseListItemDTO> getKnowledgeBase(Long id) {
-        return knowledgeBaseRepository.findById(id)
+        return knowledgeBaseRepository.findByIdAndOwnerUserId(id, currentUserService.getRequiredUserId())
             .map(knowledgeBaseMapper::toListItemDTO);
     }
 
@@ -85,17 +93,26 @@ public class KnowledgeBaseListService {
      * 根据ID获取知识库实体（用于删除等操作）
      */
     public Optional<KnowledgeBaseEntity> getKnowledgeBaseEntity(Long id) {
-        return knowledgeBaseRepository.findById(id);
+        return knowledgeBaseRepository.findByIdAndOwnerUserId(id, currentUserService.getRequiredUserId());
     }
 
     /**
      * 根据ID列表获取知识库名称列表
+     *
+     * <p>N+1 修复（PERF-002）：一次 IN 批量查询后按原顺序回填，
+     * 缺失的 id 保留「未知知识库」占位，保持原有语义。</p>
      */
     public List<String> getKnowledgeBaseNames(List<Long> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return List.of();
+        }
+        Long ownerUserId = currentUserService.getRequiredUserId();
+        Map<Long, String> namesById = knowledgeBaseRepository
+            .findAllByIdInAndOwnerUserId(ids.stream().distinct().toList(), ownerUserId)
+            .stream()
+            .collect(Collectors.toMap(KnowledgeBaseEntity::getId, KnowledgeBaseEntity::getName));
         return ids.stream()
-            .map(id -> knowledgeBaseRepository.findById(id)
-                .map(KnowledgeBaseEntity::getName)
-                .orElse("未知知识库"))
+            .map(id -> namesById.getOrDefault(id, "未知知识库"))
             .toList();
     }
 
@@ -105,7 +122,7 @@ public class KnowledgeBaseListService {
      * 获取所有分类
      */
     public List<String> getAllCategories() {
-        return knowledgeBaseRepository.findAllCategories();
+        return knowledgeBaseRepository.findAllCategories(currentUserService.getRequiredUserId());
     }
 
     /**
@@ -114,9 +131,12 @@ public class KnowledgeBaseListService {
     public List<KnowledgeBaseListItemDTO> listByCategory(String category) {
         List<KnowledgeBaseEntity> entities;
         if (category == null || category.isBlank()) {
-            entities = knowledgeBaseRepository.findByCategoryIsNullOrderByUploadedAtDesc();
+            entities = knowledgeBaseRepository
+                .findByOwnerUserIdAndCategoryIsNullOrderByUploadedAtDesc(
+                    currentUserService.getRequiredUserId());
         } else {
-            entities = knowledgeBaseRepository.findByCategoryOrderByUploadedAtDesc(category);
+            entities = knowledgeBaseRepository.findByOwnerUserIdAndCategoryOrderByUploadedAtDesc(
+                currentUserService.getRequiredUserId(), category);
         }
         return knowledgeBaseMapper.toListItemDTOList(entities);
     }
@@ -126,7 +146,8 @@ public class KnowledgeBaseListService {
      */
     @Transactional
     public void updateCategory(Long id, String category) {
-        KnowledgeBaseEntity entity = knowledgeBaseRepository.findById(id)
+        KnowledgeBaseEntity entity = knowledgeBaseRepository.findByIdAndOwnerUserId(
+                id, currentUserService.getRequiredUserId())
             .orElseThrow(() -> new BusinessException(ErrorCode.KNOWLEDGE_BASE_NOT_FOUND, "知识库不存在"));
         entity.setCategory(category != null && !category.isBlank() ? category : null);
         knowledgeBaseRepository.save(entity);
@@ -143,7 +164,8 @@ public class KnowledgeBaseListService {
             return listKnowledgeBases();
         }
         return knowledgeBaseMapper.toListItemDTOList(
-            knowledgeBaseRepository.searchByKeyword(keyword.trim())
+            knowledgeBaseRepository.searchByKeyword(
+                currentUserService.getRequiredUserId(), keyword.trim())
         );
     }
 
@@ -156,24 +178,6 @@ public class KnowledgeBaseListService {
         return listKnowledgeBases(null, sortBy);
     }
 
-    /**
-     * 在内存中对实体列表排序
-     */
-    private List<KnowledgeBaseEntity> sortEntities(List<KnowledgeBaseEntity> entities, String sortBy) {
-        return switch (sortBy.toLowerCase()) {
-            case "size" -> entities.stream()
-                .sorted((a, b) -> Long.compare(b.getFileSize(), a.getFileSize()))
-                .toList();
-            case "access" -> entities.stream()
-                .sorted((a, b) -> Integer.compare(b.getAccessCount(), a.getAccessCount()))
-                .toList();
-            case "question" -> entities.stream()
-                .sorted((a, b) -> Integer.compare(b.getQuestionCount(), a.getQuestionCount()))
-                .toList();
-            default -> entities; // time 已经在数据库层面排序了
-        };
-    }
-
     // ========== 统计功能 ==========
 
     /**
@@ -182,11 +186,14 @@ public class KnowledgeBaseListService {
      */
     public KnowledgeBaseStatsDTO getStatistics() {
         return new KnowledgeBaseStatsDTO(
-            knowledgeBaseRepository.count(),
-            ragChatMessageRepository.countByType(MessageType.USER),  // 真正的提问次数
-            knowledgeBaseRepository.sumAccessCount(),
-            knowledgeBaseRepository.countByVectorStatus(VectorStatus.COMPLETED),
-            knowledgeBaseRepository.countByVectorStatus(VectorStatus.PROCESSING)
+            knowledgeBaseRepository.countByOwnerUserId(currentUserService.getRequiredUserId()),
+            ragChatMessageRepository.countByTypeAndOwner(
+                MessageType.USER, currentUserService.getRequiredUserId()),
+            knowledgeBaseRepository.sumAccessCount(currentUserService.getRequiredUserId()),
+            knowledgeBaseRepository.countByOwnerUserIdAndVectorStatus(
+                currentUserService.getRequiredUserId(), VectorStatus.COMPLETED),
+            knowledgeBaseRepository.countByOwnerUserIdAndVectorStatus(
+                currentUserService.getRequiredUserId(), VectorStatus.PROCESSING)
         );
     }
 
@@ -196,7 +203,8 @@ public class KnowledgeBaseListService {
      * 下载知识库文件
      */
     public byte[] downloadFile(Long id) {
-        KnowledgeBaseEntity entity = knowledgeBaseRepository.findById(id)
+        KnowledgeBaseEntity entity = knowledgeBaseRepository.findByIdAndOwnerUserId(
+                id, currentUserService.getRequiredUserId())
             .orElseThrow(() -> new BusinessException(ErrorCode.KNOWLEDGE_BASE_NOT_FOUND, "知识库不存在"));
 
         String storageKey = entity.getStorageKey();
@@ -212,7 +220,24 @@ public class KnowledgeBaseListService {
      * 获取知识库文件信息（用于下载）
      */
     public KnowledgeBaseEntity getEntityForDownload(Long id) {
-        return knowledgeBaseRepository.findById(id)
+        return knowledgeBaseRepository.findByIdAndOwnerUserId(id, currentUserService.getRequiredUserId())
             .orElseThrow(() -> new BusinessException(ErrorCode.KNOWLEDGE_BASE_NOT_FOUND, "知识库不存在"));
+    }
+
+    public List<KnowledgeBaseEntity> requireOwned(List<Long> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return List.of();
+        }
+        List<Long> uniqueIds = ids.stream().distinct().toList();
+        List<KnowledgeBaseEntity> entities = knowledgeBaseRepository
+            .findAllByIdInAndOwnerUserId(uniqueIds, currentUserService.getRequiredUserId());
+        if (entities.size() != uniqueIds.size()) {
+            throw new BusinessException(ErrorCode.KNOWLEDGE_BASE_NOT_FOUND, "部分知识库不存在");
+        }
+        return entities;
+    }
+
+    public Long getOwnerUserId() {
+        return currentUserService.getRequiredUserId();
     }
 }

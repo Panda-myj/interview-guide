@@ -11,8 +11,10 @@ import { InterviewFormModal } from '../components/interviewschedule/InterviewFor
 import { CalendarErrorBoundary } from '../components/interviewschedule/CalendarErrorBoundary';
 import ConfirmDialog from '../components/ConfirmDialog';
 import type { InterviewSchedule, InterviewFormData, InterviewStatus } from '../types/interviewSchedule';
+import { useToast } from '../components/Toast';
 
 export const InterviewSchedulePage: React.FC = () => {
+  const toast = useToast();
   const {
     interviews,
     loading,
@@ -80,7 +82,7 @@ export const InterviewSchedulePage: React.FC = () => {
         });
       } catch (error) {
         console.error('Failed to update interview time:', error);
-        alert('更新面试时间失败，请重试');
+        toast.error('更新面试时间失败，请重试');
       }
     }
   }, [interviews, updateInterview]);
@@ -103,7 +105,7 @@ export const InterviewSchedulePage: React.FC = () => {
         });
       } catch (error) {
         console.error('Failed to update interview duration:', error);
-        alert('更新面试时长失败，请重试');
+        toast.error('更新面试时长失败，请重试');
       }
     }
   }, [interviews, updateInterview]);

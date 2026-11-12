@@ -5,6 +5,7 @@ import interview.guide.common.constant.AsyncTaskStreamConstants;
 import interview.guide.infrastructure.redis.RedisService;
 import interview.guide.modules.knowledgebase.model.VectorStatus;
 import interview.guide.modules.knowledgebase.repository.KnowledgeBaseRepository;
+import interview.guide.modules.knowledgebase.model.KnowledgeBaseEntity;
 import interview.guide.modules.knowledgebase.service.KnowledgeBaseVectorService;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.stream.StreamMessageId;
@@ -91,11 +92,12 @@ public class VectorizeStreamConsumer extends AbstractStreamConsumer<VectorizeStr
     @Override
     protected void processBusiness(VectorizePayload payload) {
         Long kbId = payload.kbId();
-        if (!knowledgeBaseRepository.existsById(kbId)) {
+        KnowledgeBaseEntity kb = knowledgeBaseRepository.findById(kbId).orElse(null);
+        if (kb == null) {
             log.warn("知识库已被删除，跳过向量化任务: kbId={}", kbId);
             return;
         }
-        vectorService.vectorizeAndStore(payload.kbId(), payload.content());
+        vectorService.vectorizeAndStore(kbId, kb.getOwnerUser().getId(), payload.content());
     }
 
     @Override

@@ -1,12 +1,16 @@
 package interview.guide.modules.interview.model;
 
 import interview.guide.common.model.AsyncTaskStatus;
+import interview.guide.modules.auth.model.UserEntity;
 import interview.guide.modules.resume.model.ResumeEntity;
 import jakarta.persistence.*;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * 面试会话实体
@@ -22,6 +26,13 @@ public class InterviewSessionEntity {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
+
+    @Version
+    private Long version;
+
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "owner_user_id", nullable = false)
+    private UserEntity ownerUser;
     
     // 会话ID (UUID)
     @Column(nullable = false, unique = true, length = 36)
@@ -98,6 +109,10 @@ public class InterviewSessionEntity {
     @Column(length = 500)
     private String evaluateError;
 
+    // 评估尝试次数（用于检索失败任务与重放，向后兼容可为空）
+    @Column(name = "evaluate_attempt")
+    private Integer evaluateAttempt;
+
     // LLM提供商
     @Column(length = 50)
     private String llmProvider = "dashscope";
@@ -108,7 +123,45 @@ public class InterviewSessionEntity {
         COMPLETED,    // 面试已完成
         EVALUATED     // 已生成评估报告
     }
-    
+
+    /**
+     * 面试会话状态迁移表：key 为当前状态，value 为允许迁移到的目标状态。
+     * 同状态迁移视为幂等空操作（例如重复交卷、重复回写状态）。
+     */
+    private static final Map<SessionStatus, Set<SessionStatus>> ALLOWED_TRANSITIONS = Map.of(
+        SessionStatus.CREATED, EnumSet.of(SessionStatus.CREATED, SessionStatus.IN_PROGRESS,
+            SessionStatus.COMPLETED),
+        SessionStatus.IN_PROGRESS, EnumSet.of(SessionStatus.IN_PROGRESS, SessionStatus.COMPLETED),
+        SessionStatus.COMPLETED, EnumSet.of(SessionStatus.COMPLETED, SessionStatus.EVALUATED),
+        SessionStatus.EVALUATED, EnumSet.of(SessionStatus.EVALUATED)
+    );
+
+    /**
+     * 判断会话状态迁移是否合法。
+     *
+     * @param from 当前状态，null 视为尚未初始化
+     * @param to   目标状态
+     */
+    public static boolean canTransition(SessionStatus from, SessionStatus to) {
+        if (to == null) {
+            return false;
+        }
+        if (from == null) {
+            return to == SessionStatus.CREATED;
+        }
+        return ALLOWED_TRANSITIONS.getOrDefault(from, Set.of()).contains(to);
+    }
+
+    /**
+     * 返回指定状态允许迁移到的目标状态集合。
+     */
+    public static Set<SessionStatus> allowedTargets(SessionStatus from) {
+        if (from == null) {
+            return EnumSet.of(SessionStatus.CREATED);
+        }
+        return ALLOWED_TRANSITIONS.getOrDefault(from, Set.of());
+    }
+
     @PrePersist
     protected void onCreate() {
         createdAt = LocalDateTime.now();
@@ -118,9 +171,21 @@ public class InterviewSessionEntity {
     public Long getId() {
         return id;
     }
+
+    public Long getVersion() {
+        return version;
+    }
     
     public void setId(Long id) {
         this.id = id;
+    }
+
+    public UserEntity getOwnerUser() {
+        return ownerUser;
+    }
+
+    public void setOwnerUser(UserEntity ownerUser) {
+        this.ownerUser = ownerUser;
     }
     
     public String getSessionId() {
@@ -253,6 +318,14 @@ public class InterviewSessionEntity {
 
     public void setEvaluateError(String evaluateError) {
         this.evaluateError = evaluateError;
+    }
+
+    public Integer getEvaluateAttempt() {
+        return evaluateAttempt;
+    }
+
+    public void setEvaluateAttempt(Integer evaluateAttempt) {
+        this.evaluateAttempt = evaluateAttempt;
     }
 
     public String getLlmProvider() {

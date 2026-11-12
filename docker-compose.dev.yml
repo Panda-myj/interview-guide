@@ -4,18 +4,18 @@
 # 清除数据：docker compose -f docker-compose.dev.yml down -v
 
 services:
+  # 开发依赖仅在独立内部网络暴露；宿主机如需调试容器，应通过 docker exec。
+  # 这样可避免 PostgreSQL、Redis、RustFS 的宿主机端口和凭据直接暴露。
   postgres:
     image: pgvector/pgvector:pg16
     container_name: interview-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-123456}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:-interview_guide}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
-    ports:
-      - "5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -25,8 +25,6 @@ services:
   redis:
     image: redis:7
     container_name: interview-redis
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -40,12 +38,9 @@ services:
     container_name: interview-rustfs
     command: ["/data"]
     environment:
-      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-rustfsadmin}
-      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-rustfsadmin}
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:?RUSTFS_ACCESS_KEY is required}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:?RUSTFS_SECRET_KEY is required}
       RUSTFS_CONSOLE_ENABLE: "true"
-    ports:
-      - "9000:9000"# API端口
-      - "9001:9001"# 控制台端口
     volumes:
       - rustfs_data:/data
     healthcheck:

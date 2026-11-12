@@ -1,13 +1,16 @@
 package interview.guide.common.async;
 
 import interview.guide.common.constant.AsyncTaskStreamConstants;
+import interview.guide.common.model.AsyncTaskStatus;
 import interview.guide.infrastructure.redis.RedisService;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.stream.StreamMessageId;
 
+import java.util.EnumSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -31,6 +34,26 @@ import java.util.concurrent.atomic.AtomicBoolean;
 //两者都依赖 RedisService（封装了 Redisson 的 Stream 操作）。
 @Slf4j
 public abstract class AbstractStreamConsumer<T> {
+
+    /**
+     * 异步任务状态迁移表：key 为当前状态，value 为允许迁移到的目标状态。
+     *
+     * <p>说明：
+     * <ul>
+     *   <li>PENDING 由生产者写入，消费者通过条件更新抢占为 PROCESSING；</li>
+     *   <li>PROCESSING 失败后回到 PENDING 表示重新入队，超过重试上限则进入 FAILED；</li>
+     *   <li>COMPLETED 为终态，重复迁移视为幂等空操作；</li>
+     *   <li>FAILED 可被人工重放拉回 PENDING。</li>
+     * </ul>
+     */
+    private static final Map<AsyncTaskStatus, Set<AsyncTaskStatus>> ASYNC_TASK_TRANSITIONS = Map.of(
+        AsyncTaskStatus.PENDING, EnumSet.of(AsyncTaskStatus.PENDING, AsyncTaskStatus.PROCESSING,
+            AsyncTaskStatus.FAILED),
+        AsyncTaskStatus.PROCESSING, EnumSet.of(AsyncTaskStatus.PROCESSING, AsyncTaskStatus.COMPLETED,
+            AsyncTaskStatus.FAILED, AsyncTaskStatus.PENDING),
+        AsyncTaskStatus.COMPLETED, EnumSet.of(AsyncTaskStatus.COMPLETED),
+        AsyncTaskStatus.FAILED, EnumSet.of(AsyncTaskStatus.FAILED, AsyncTaskStatus.PENDING)
+    );
 
     private final RedisService redisService;
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -58,7 +81,7 @@ public abstract class AbstractStreamConsumer<T> {
                 new LinkedBlockingQueue<>(),// workQueue: 无界阻塞队列，任务可无限堆积，不会触发拒绝策略（但也存在OOM风险）。new LinkedBlockingQueue<>(capacity)是有界队列
                 r -> {                      // threadFactory: 自定义线程工厂
                     Thread t = new Thread(r, threadName()); // 以指定名称创建线程，便于日志追踪和问题排查
-                    t.setDaemon(true);      // ⚠️ 设为守护线程：JVM退出时该线程自动终止，不会阻止主进程关闭
+                    t.setDaemon(true);      // 守护线程：JVM 退出时不阻塞主进程关闭
                     return t;
                 },
                 new ThreadPoolExecutor.AbortPolicy() // handler: 拒绝策略为抛出RejectedExecutionException
@@ -66,17 +89,8 @@ public abstract class AbstractStreamConsumer<T> {
         );
 
         running.set(true);
-        executorService.submit(this::startConsumer);//提交 startConsumer 任务 → 确保 Stream 和 Group 存在 → 进入无限消费循环。
-//        this::startConsumer 是java 8 引入的方法引用（Method Reference）语法，
-//        等价于lambda语法：
-//        executorService.submit(this::startConsumer);
-//        executorService.submit(() -> this.startConsumer());
-//        当 startConsumer() 是一个无参、无返回值（void） 的方法时，它恰好符合 Runnable 函数式接口的 void run() 签名，因此可以直接作为 Runnable 传入 submit()。
-//立即返回	submit() 不会阻塞当前线程，调用后立刻得到一个 Future<?> 对象
-//异步执行	startConsumer() 被放入线程池的任务队列中，由线程池的工作线程在稍后某个时刻执行
-//        注意：这里用的是 submit() 而非 execute()。submit() 会捕获任务内部的异常并封装到 Future 中，不会直接抛出；而 execute() 会将异常传播到线程的 UncaughtExceptionHandler
-
-//        一句话总结：把当前对象的 startConsumer 方法作为一个异步任务，交给单线程守护线程池去后台持续运行，调用方不阻塞、不等待。
+        // 单线程守护线程池后台持续消费；用 submit() 而非 execute()：异常被封装进 Future，不会传播到 UncaughtExceptionHandler
+        executorService.submit(this::startConsumer);
         log.info("{} consumer started: consumerName={}", taskDisplayName(), consumerName);
     }
 
@@ -163,7 +177,7 @@ public abstract class AbstractStreamConsumer<T> {
     重试机制由业务层自行实现（如重新入队），基类只传递重试次数。
 
     所有抽象方法提供了业务介入点，形成完整的“处理模板”。*/
-    private void processMessage(StreamMessageId messageId, Map<String, String> data) {
+    protected void processMessage(StreamMessageId messageId, Map<String, String> data) {
         T payload;
         try {
             payload = parsePayload(messageId, data);
@@ -190,7 +204,13 @@ public abstract class AbstractStreamConsumer<T> {
                 log.info("{} task skipped: {}", taskDisplayName(), payloadIdentifier(payload));
                 return;
             }
-            markProcessing(payload);
+            if (!tryClaimProcessing(payload)) {
+                // 重复投递、乱序旧消息或已被其它实例抢占：直接 ACK 丢弃，避免重复副作用
+                ackMessage(messageId);
+                log.info("{} task not claimed, ack and discard: {}", taskDisplayName(),
+                    payloadIdentifier(payload));
+                return;
+            }
             processBusiness(payload);
             markCompleted(payload);
             ackMessage(messageId);
@@ -226,6 +246,33 @@ public abstract class AbstractStreamConsumer<T> {
         return error.length() > 500 ? error.substring(0, 500) : error;
     }
 
+    /**
+     * 判断异步任务状态迁移是否合法。
+     *
+     * @param from 当前状态，null 表示任务尚未初始化
+     * @param to   目标状态
+     * @return 合法返回 true
+     */
+    public static boolean canTransitAsyncTaskStatus(AsyncTaskStatus from, AsyncTaskStatus to) {
+        if (to == null) {
+            return false;
+        }
+        if (from == null) {
+            return to == AsyncTaskStatus.PENDING || to == AsyncTaskStatus.FAILED;
+        }
+        return ASYNC_TASK_TRANSITIONS.getOrDefault(from, Set.of()).contains(to);
+    }
+
+    /**
+     * 返回指定状态允许迁移到的目标状态集合。
+     */
+    public static Set<AsyncTaskStatus> allowedAsyncTaskTargets(AsyncTaskStatus from) {
+        if (from == null) {
+            return EnumSet.of(AsyncTaskStatus.PENDING, AsyncTaskStatus.FAILED);
+        }
+        return ASYNC_TASK_TRANSITIONS.getOrDefault(from, Set.of());
+    }
+
     private void ackMessage(StreamMessageId messageId) {
         try {
             redisService.streamAck(streamKey(), groupName(), messageId);
@@ -254,6 +301,18 @@ public abstract class AbstractStreamConsumer<T> {
 
     protected boolean shouldSkip(T payload) {
         return false;
+    }
+
+    /**
+     * 处理前原子占位（幂等入口）。
+     *
+     * <p>默认实现直接调用 {@link #markProcessing} 并认为抢占成功，兼容未实现条件更新的消费者。
+     * 需要幂等的消费者应重写为“期望状态 → PROCESSING”的条件更新，并按 UPDATE 影响行数返回：
+     * 返回 false 表示未抢到处理权（重复投递、乱序旧消息、已被其它实例处理），消息将直接 ACK 丢弃。</p>
+     */
+    protected boolean tryClaimProcessing(T payload) {
+        markProcessing(payload);
+        return true;
     }
 
     protected abstract void markProcessing(T payload);

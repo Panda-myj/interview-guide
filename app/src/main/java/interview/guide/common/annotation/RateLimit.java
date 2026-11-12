@@ -64,7 +64,11 @@ public @interface RateLimit {
         /**
          * 用户限流：按用户ID限流
          */
-        USER
+        USER,
+        /**
+         * 手机号限流：从请求对象中的 phone 字段提取并哈希后限流
+         */
+        PHONE
     }
 
     /**

@@ -6,7 +6,9 @@ import type { UploadKnowledgeBaseResponse } from './api/knowledgebase';
 import type { Difficulty } from './components/UnifiedInterviewModal';
 import type { CategoryDTO } from './api/skill';
 import { Loader2 } from 'lucide-react';
-import { ROUTES } from './constants/routes';
+import { ROUTES, ROUTE_SEGMENTS, path } from './constants/routes';
+import { AuthProvider } from './auth/AuthProvider';
+import { AdminRoute, ProtectedRoute } from './auth/RouteGuards';
 
 // Lazy load components
 const UploadPage = lazy(() => import('./pages/UploadPage'));
@@ -23,6 +25,8 @@ const InterviewSchedulePage = lazy(() => import('./pages/InterviewSchedulePage')
 const InterviewHubPage = lazy(() => import('./pages/InterviewHubPage'));
 const SettingsPage = lazy(() => import('./pages/SettingsPage'));
 const InterviewDetailPanel = lazy(() => import('./components/InterviewDetailPanel'));
+const LoginPage = lazy(() => import('./pages/LoginPage'));
+const AccountPage = lazy(() => import('./pages/AccountPage'));
 
 // Loading component
 const Loading = () => (
@@ -37,7 +41,7 @@ function UploadPageWrapper() {
 
   const handleUploadComplete = (resumeId: number) => {
     // 异步模式：上传成功后跳转到简历库，让用户在列表中查看分析状态
-    navigate('/history', { state: { newResumeId: resumeId } });
+    navigate(ROUTES.resumeHistory, { state: { newResumeId: resumeId } });
   };
 
   return <UploadPage onUploadComplete={handleUploadComplete} />;
@@ -48,7 +52,7 @@ function HistoryListWrapper() {
   const navigate = useNavigate();
 
   const handleSelectResume = (id: number) => {
-    navigate(`/history/${id}`);
+    navigate(path.resumeDetail(id));
   };
 
   return <HistoryList onSelectResume={handleSelectResume} />;
@@ -61,11 +65,11 @@ function ResumeDetailWrapper() {
   const { openInterviewModalWithResume } = useOutletContext<{ openInterviewModalWithResume: (resumeId: number) => void }>();
 
   if (!resumeId) {
-    return <Navigate to="/history" replace />;
+    return <Navigate to={ROUTES.resumeHistory} replace />;
   }
 
   const handleBack = () => {
-    navigate('/history');
+    navigate(ROUTES.resumeHistory);
   };
 
   const handleStartInterview = (id: number) => {
@@ -129,15 +133,15 @@ function InterviewWrapper() {
 
   const handleBack = () => {
     if (effectiveResumeId) {
-      navigate(`/history/${effectiveResumeId}`, { replace: false });
+      navigate(path.resumeDetail(effectiveResumeId), { replace: false });
       return;
     }
-    navigate('/history', { replace: false });
+    navigate(ROUTES.resumeHistory, { replace: false });
   };
 
   const handleInterviewComplete = () => {
     // 面试完成后跳转到面试记录页
-    navigate('/interviews');
+    navigate(ROUTES.interviewHistory);
   };
 
   if (loading) {
@@ -165,62 +169,51 @@ function InterviewWrapper() {
 
 function App() {
   return (
-    <BrowserRouter>
-      <Suspense fallback={<Loading />}>
-        <Routes>
-          <Route path="/" element={<Layout />}>
-            {/* 默认重定向到简历管理页面 */}
-            <Route index element={<Navigate to="/history" replace />} />
+    <AuthProvider>
+      <BrowserRouter>
+        <Suspense fallback={<Loading />}>
+          <Routes>
+            <Route path={ROUTE_SEGMENTS.login} element={<LoginPage />} />
+            <Route element={<ProtectedRoute />}>
+              <Route path="/" element={<Layout />}>
+                {/* 默认重定向到简历管理页面 */}
+                <Route index element={<Navigate to={ROUTES.resumeHistory} replace />} />
 
-            {/* 上传页面 */}
-            <Route path="upload" element={<UploadPageWrapper />} />
+                {/* 简历：上传 / 列表 / 详情 */}
+                <Route path={ROUTE_SEGMENTS.resumeUpload} element={<UploadPageWrapper />} />
+                <Route path={ROUTE_SEGMENTS.resumeHistory} element={<HistoryListWrapper />} />
+                <Route path={ROUTE_SEGMENTS.resumeDetail} element={<ResumeDetailWrapper />} />
 
-            {/* 历史记录列表（简历库） */}
-            <Route path="history" element={<HistoryListWrapper />} />
+                {/* 面试：入口 / 记录 / 详情 / 文字面试 / 语音面试 */}
+                <Route path={ROUTE_SEGMENTS.interviewHub} element={<InterviewHubPage />} />
+                <Route path={ROUTE_SEGMENTS.interviewHistory} element={<InterviewHistoryWrapper />} />
+                <Route path={ROUTE_SEGMENTS.interviewDetail} element={<InterviewDetailPageWrapper />} />
+                <Route path={ROUTE_SEGMENTS.interview} element={<InterviewWrapper />} />
+                <Route path={ROUTE_SEGMENTS.interviewWithResume} element={<InterviewWrapper />} />
+                <Route path={ROUTE_SEGMENTS.voiceInterview} element={<VoiceInterviewPageWrapper />} />
+                <Route path={ROUTE_SEGMENTS.voiceEvaluation} element={<VoiceInterviewEvaluationPage />} />
 
-            {/* 简历详情 */}
-            <Route path="history/:resumeId" element={<ResumeDetailWrapper />} />
+                {/* 知识库：管理 / 上传 / 问答 */}
+                <Route path={ROUTE_SEGMENTS.knowledgebase} element={<KnowledgeBaseManagePageWrapper />} />
+                <Route path={ROUTE_SEGMENTS.knowledgebaseUpload} element={<KnowledgeBaseUploadPageWrapper />} />
+                <Route path={ROUTE_SEGMENTS.knowledgebaseChat} element={<KnowledgeBaseQueryPageWrapper />} />
 
-            {/* 面试中心 */}
-            <Route path="interview-hub" element={<InterviewHubPage />} />
+                {/* 面试日程 */}
+                <Route path={ROUTE_SEGMENTS.interviewSchedule} element={<InterviewSchedulePage />} />
 
-            {/* 面试记录列表 */}
-            <Route path="interviews" element={<InterviewHistoryWrapper />} />
+                {/* 账号与安全：站内登录提醒、注销账号（所有登录用户可访问） */}
+                <Route path={ROUTE_SEGMENTS.account} element={<AccountPage />} />
 
-            {/* 面试详情报告 */}
-            <Route path="interviews/:sessionId" element={<InterviewDetailPageWrapper />} />
-
-            {/* 模拟面试（通用入口） */}
-            <Route path="interview" element={<InterviewWrapper />} />
-
-            {/* 模拟面试 */}
-            <Route path="interview/:resumeId" element={<InterviewWrapper />} />
-
-            {/* 语音面试 */}
-            <Route path="voice-interview" element={<VoiceInterviewPageWrapper />} />
-
-            {/* 语音面试评估报告 */}
-            <Route path="voice-interview/:sessionId/evaluation" element={<VoiceInterviewEvaluationPage />} />
-
-            {/* 知识库管理 */}
-            <Route path="knowledgebase" element={<KnowledgeBaseManagePageWrapper />} />
-
-            {/* 知识库上传 */}
-            <Route path="knowledgebase/upload" element={<KnowledgeBaseUploadPageWrapper />} />
-
-            {/* 面试日程管理 */}
-            <Route path="interview-schedule" element={<InterviewSchedulePage />} />
-
-            {/* 设置 */}
-            <Route path="settings" element={<SettingsPage />} />
-
-            {/* 问答助手（知识库聊天） */}
-            <Route path="knowledgebase/chat" element={<KnowledgeBaseQueryPageWrapper />} />
-          </Route>
-
-        </Routes>
-      </Suspense>
-    </BrowserRouter>
+                <Route element={<AdminRoute />}>
+                  <Route path={ROUTE_SEGMENTS.settings} element={<SettingsPage />} />
+                </Route>
+              </Route>
+            </Route>
+            <Route path="*" element={<Navigate to={ROUTES.resumeHistory} replace />} />
+          </Routes>
+        </Suspense>
+      </BrowserRouter>
+    </AuthProvider>
   );
 }
 
@@ -230,11 +223,11 @@ function InterviewHistoryWrapper() {
   const { openInterviewModalWithResume } = useOutletContext<{ openInterviewModalWithResume: (resumeId: number) => void }>();
 
   const handleBack = () => {
-    navigate('/history');
+    navigate(ROUTES.resumeHistory);
   };
 
   const handleViewInterview = async (sessionId: string, _resumeId?: number) => {
-    navigate(`/interviews/${sessionId}`);
+    navigate(path.interviewDetail(sessionId));
   };
 
   const handleRestartInterview = (resumeId: number) => {
@@ -242,7 +235,7 @@ function InterviewHistoryWrapper() {
   };
 
   const handleContinueInterview = (sessionId: string) => {
-    navigate('/interview', { state: { sessionIdToResume: sessionId } });
+    navigate(ROUTES.interview, { state: { sessionIdToResume: sessionId } });
   };
 
   return <InterviewHistoryPage onBack={handleBack} onViewInterview={handleViewInterview} onRestartInterview={handleRestartInterview} onContinueInterview={handleContinueInterview} />;
@@ -258,7 +251,7 @@ function InterviewDetailPageWrapper() {
 
   useEffect(() => {
     if (!sessionId) {
-      navigate('/interviews');
+      navigate(ROUTES.interviewHistory);
       return;
     }
     historyApi.getInterviewDetail(sessionId)
@@ -286,7 +279,7 @@ function InterviewDetailPageWrapper() {
         <div className="text-center">
           <p className="text-red-500 mb-4">{error || '面试记录不存在'}</p>
           <button
-            onClick={() => navigate('/interviews')}
+            onClick={() => navigate(ROUTES.interviewHistory)}
             className="px-5 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600"
           >
             返回面试记录
@@ -300,7 +293,7 @@ function InterviewDetailPageWrapper() {
     <div className="max-w-4xl mx-auto">
       <div className="flex items-center gap-3 mb-6">
         <button
-          onClick={() => navigate('/interviews')}
+          onClick={() => navigate(ROUTES.interviewHistory)}
           className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
         >
           <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -323,7 +316,7 @@ function KnowledgeBaseManagePageWrapper() {
   };
 
   const handleChat = () => {
-    navigate('/knowledgebase/chat');
+    navigate(ROUTES.knowledgebaseChat);
   };
 
   return <KnowledgeBaseManagePage onUpload={handleUpload} onChat={handleChat} />;
@@ -333,13 +326,13 @@ function KnowledgeBaseManagePageWrapper() {
 function KnowledgeBaseQueryPageWrapper() {
   const navigate = useNavigate();
   const location = useLocation();
-  const isChatMode = location.pathname === '/knowledgebase/chat';
+  const isChatMode = location.pathname === ROUTES.knowledgebaseChat;
 
   const handleBack = () => {
     if (isChatMode) {
-      navigate('/knowledgebase');
+      navigate(ROUTES.knowledgebase);
     } else {
-      navigate('/history');
+      navigate(ROUTES.resumeHistory);
     }
   };
 
@@ -356,11 +349,11 @@ function KnowledgeBaseUploadPageWrapper() {
 
   const handleUploadComplete = (_result: UploadKnowledgeBaseResponse) => {
     // 上传完成后返回管理页面
-    navigate('/knowledgebase');
+    navigate(ROUTES.knowledgebase);
   };
 
   const handleBack = () => {
-    navigate('/knowledgebase');
+    navigate(ROUTES.knowledgebase);
   };
 
   return <KnowledgeBaseUploadPage onUploadComplete={handleUploadComplete} onBack={handleBack} />;

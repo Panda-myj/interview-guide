@@ -3,6 +3,7 @@ package interview.guide.modules.resume.service;
 import interview.guide.common.exception.BusinessException;
 import interview.guide.common.exception.ErrorCode;
 import interview.guide.infrastructure.export.PdfExportService;
+import interview.guide.infrastructure.file.FileStorageService;
 import interview.guide.infrastructure.mapper.InterviewMapper;
 import interview.guide.infrastructure.mapper.ResumeMapper;
 import interview.guide.modules.interview.model.InterviewHistoryItemDTO;
@@ -14,13 +15,14 @@ import interview.guide.modules.resume.model.ResumeEntity;
 import interview.guide.modules.resume.model.ResumeListItemDTO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import tools.jackson.core.JacksonException;
 import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.ObjectMapper;
 
-import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -38,27 +40,37 @@ public class ResumeHistoryService {
     private final ObjectMapper objectMapper;
     private final ResumeMapper resumeMapper;
     private final InterviewMapper interviewMapper;
+    private final FileStorageService fileStorageService;
+
+    /** 列表接口默认返回条数。 */
+    private static final int DEFAULT_PAGE_SIZE = 50;
+
+    /** 列表接口单次返回的硬上限，防止全量拉取。 */
+    private static final int MAX_PAGE_SIZE = 200;
 
     /**
-     * 获取所有简历列表
+     * 获取所有简历列表（截断式分页：默认 50 条、上限 200 条）。
+     *
+     * <p>N+1 修复（PERF-002）：最新评测与面试次数各由一条批量聚合查询取得，
+     * 循环内不再发起单条查询。响应仍为 List 形状（截断而非改契约），
+     * 后续如需翻页/总数应演进为 Page 契约并同步前端。</p>
      */
-    public List<ResumeListItemDTO> getAllResumes() {
-        List<ResumeEntity> resumes = resumePersistenceService.findAllResumes();
+    public List<ResumeListItemDTO> getAllResumes(int size) {
+        int pageSize = Math.max(1, Math.min(size, MAX_PAGE_SIZE));
+        List<ResumeEntity> resumes = resumePersistenceService.findAllResumes(
+            PageRequest.of(0, pageSize));
+        if (resumes.isEmpty()) {
+            return List.of();
+        }
+
+        List<Long> resumeIds = resumes.stream().map(ResumeEntity::getId).toList();
+        Map<Long, ResumeAnalysisEntity> latestAnalyses =
+            resumePersistenceService.findLatestAnalysesByResumeIds(resumeIds);
+        Map<Long, Long> interviewCounts =
+            interviewPersistenceService.countSessionsByResumeIds(resumeIds);
 
         return resumes.stream().map(resume -> {
-            // 获取最新分析结果的分数
-            Integer latestScore = null;
-            LocalDateTime lastAnalyzedAt = null;
-            Optional<ResumeAnalysisEntity> analysisOpt = resumePersistenceService.getLatestAnalysis(resume.getId());
-            if (analysisOpt.isPresent()) {
-                ResumeAnalysisEntity analysis = analysisOpt.get();
-                latestScore = analysis.getOverallScore();
-                lastAnalyzedAt = analysis.getAnalyzedAt();
-            }
-
-            // 获取面试次数
-            int interviewCount = interviewPersistenceService.findByResumeId(resume.getId()).size();
-
+            ResumeAnalysisEntity analysis = latestAnalyses.get(resume.getId());
             // 使用 MapStruct 映射
             return new ResumeListItemDTO(
                 resume.getId(),
@@ -66,13 +78,20 @@ public class ResumeHistoryService {
                 resume.getFileSize(),
                 resume.getUploadedAt(),
                 resume.getAccessCount(),
-                latestScore,
-                lastAnalyzedAt,
-                interviewCount,
+                analysis != null ? analysis.getOverallScore() : null,
+                analysis != null ? analysis.getAnalyzedAt() : null,
+                interviewCounts.getOrDefault(resume.getId(), 0L).intValue(),
                 resume.getAnalyzeStatus(),
                 resume.getAnalyzeError()
             );
         }).toList();
+    }
+
+    /**
+     * 获取所有简历列表（保持向后兼容，默认 50 条）
+     */
+    public List<ResumeListItemDTO> getAllResumes() {
+        return getAllResumes(DEFAULT_PAGE_SIZE);
     }
 
     /**
@@ -181,5 +200,20 @@ public class ResumeHistoryService {
      * PDF导出结果
      */
     public record ExportResult(byte[] pdfBytes, String filename) {}
+
+    public DownloadResult downloadOriginal(Long resumeId) {
+        ResumeEntity resume = resumePersistenceService.findById(resumeId)
+            .orElseThrow(() -> new BusinessException(ErrorCode.RESUME_NOT_FOUND));
+        if (resume.getStorageKey() == null || resume.getStorageKey().isBlank()) {
+            throw new BusinessException(ErrorCode.STORAGE_DOWNLOAD_FAILED, "简历文件不存在");
+        }
+        return new DownloadResult(
+            fileStorageService.downloadFile(resume.getStorageKey()),
+            resume.getOriginalFilename(),
+            resume.getContentType()
+        );
+    }
+
+    public record DownloadResult(byte[] content, String filename, String contentType) {}
 }
 

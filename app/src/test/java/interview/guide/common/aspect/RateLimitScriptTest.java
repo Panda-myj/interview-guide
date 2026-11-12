@@ -25,7 +25,7 @@ class RateLimitScriptTest {
                 RateLimit.class.getAnnotation(Retention.class).value());
         assertArrayEquals(new ElementType[]{ElementType.METHOD},
                 RateLimit.class.getAnnotation(Target.class).value());
-        assertEquals(3, RateLimit.Dimension.values().length);
+        assertEquals(4, RateLimit.Dimension.values().length);
         assertEquals(5, RateLimit.TimeUnit.values().length);
         // 验证 @Repeatable 存在
         assertNotNull(RateLimit.class.getAnnotation(Repeatable.class));

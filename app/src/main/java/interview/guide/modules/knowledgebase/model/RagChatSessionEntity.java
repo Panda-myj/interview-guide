@@ -1,5 +1,6 @@
 package interview.guide.modules.knowledgebase.model;
 
+import interview.guide.modules.auth.model.UserEntity;
 import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
@@ -27,6 +28,10 @@ public class RagChatSessionEntity {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
+
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "owner_user_id", nullable = false)
+    private UserEntity ownerUser;
 
     /**
      * 会话标题（可自动生成或用户自定义）

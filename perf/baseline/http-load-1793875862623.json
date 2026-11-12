@@ -1,0 +1,17 @@
+{
+  "path": "/api/interview/sessions?page=0&size=20",
+  "startedAt": "2026-11-05T10:50:02.599Z",
+  "finishedAt": "2026-11-05T10:51:02.602Z",
+  "concurrency": 10,
+  "durationMs": 60000,
+  "requests": 78546,
+  "ok": 78546,
+  "errors": 0,
+  "errorRate": 0,
+  "rps": 1309.1,
+  "latencyP50": 7.3,
+  "latencyP95": 10.3,
+  "latencyP99": 14.2,
+  "latencyMax": 101.7,
+  "sampleErrors": []
+}

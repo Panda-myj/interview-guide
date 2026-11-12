@@ -1,15 +1,21 @@
 package interview.guide.modules.llmprovider.service;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import interview.guide.common.ai.LlmProviderRegistry;
 import interview.guide.common.config.LlmProviderProperties;
 import interview.guide.common.exception.BusinessException;
 import interview.guide.common.exception.ErrorCode;
+import interview.guide.modules.llmprovider.dto.AsrConfigRequest;
 import interview.guide.modules.llmprovider.dto.CreateProviderRequest;
 import interview.guide.modules.llmprovider.dto.DefaultProviderDTO;
+import interview.guide.modules.llmprovider.dto.ProviderTestResult;
 import interview.guide.modules.llmprovider.dto.UpdateProviderRequest;
 import interview.guide.modules.voiceinterview.config.VoiceInterviewProperties;
 import interview.guide.modules.voiceinterview.service.QwenAsrService;
 import interview.guide.modules.voiceinterview.service.QwenTtsService;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -18,17 +24,23 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.List;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -36,6 +48,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -44,6 +58,12 @@ import static org.mockito.Mockito.when;
 @DisplayName("LlmProviderConfigService 测试")
 class LlmProviderConfigServiceTest {
 
+    private static final String RUNTIME_CONFIG_HEADER = """
+        app:
+          ai:
+            providers: {}
+        """;
+
     @Mock private LlmProviderProperties properties;
     @Mock private LlmProviderRegistry registry;
     @Mock private VoiceInterviewProperties voiceProperties;
@@ -51,25 +71,23 @@ class LlmProviderConfigServiceTest {
     @Mock private QwenTtsService ttsService;
 
     private LlmProviderConfigService service;
+    private Path runtimeConfigFile;
 
     @BeforeEach
     void setUp(@TempDir Path tempDir) throws IOException {
-        Path tempYaml = tempDir.resolve("application.yml");
-        Path tempEnv = tempDir.resolve(".env");
-        Files.writeString(tempYaml, """
-            app:
-              ai:
-                providers: {}
-            """);
-        Files.writeString(tempEnv, "");
+        runtimeConfigFile = tempDir.resolve("runtime-config.yml");
+        Files.writeString(runtimeConfigFile, RUNTIME_CONFIG_HEADER, StandardCharsets.UTF_8);
 
-        when(properties.getConfigYamlPath()).thenReturn(tempYaml.toString());
-        when(properties.getConfigEnvPath()).thenReturn(tempEnv.toString());
+        when(properties.getConfigYamlPath()).thenReturn(runtimeConfigFile.toString());
 
-        service = new LlmProviderConfigService(
+        service = newService(voiceProperties);
+    }
+
+    private LlmProviderConfigService newService(VoiceInterviewProperties voiceProps) {
+        return new LlmProviderConfigService(
             properties,
             registry,
-            voiceProperties,
+            voiceProps,
             asrService,
             ttsService
         );
@@ -87,12 +105,36 @@ class LlmProviderConfigServiceTest {
             Path unreachableYaml = sentinel.resolve("child/llm-providers.yml");
 
             when(properties.getConfigYamlPath()).thenReturn(unreachableYaml.toString());
-            when(properties.getConfigEnvPath()).thenReturn(tempDir.resolve(".env").toString());
 
-            LlmProviderConfigService failing = new LlmProviderConfigService(
-                properties, registry, voiceProperties, asrService, ttsService);
+            LlmProviderConfigService failing = newService(voiceProperties);
 
             assertThrows(BusinessException.class, failing::validateWritablePaths);
+        }
+
+        @Test
+        @DisplayName("未配置 config-yaml-path 时启动校验不创建任何文件")
+        void validateWritablePathsSkipsWhenNotConfigured(@TempDir Path tempDir) throws IOException {
+            when(properties.getConfigYamlPath()).thenReturn(null);
+
+            LlmProviderConfigService noFileService = newService(voiceProperties);
+
+            assertDoesNotThrow(noFileService::validateWritablePaths);
+            try (var entries = Files.list(tempDir)) {
+                assertEquals(0, entries.count());
+            }
+        }
+
+        @Test
+        @DisplayName("拒绝把运行期配置写回 classpath / 源码目录")
+        void rejectsClasspathLocation(@TempDir Path tempDir) {
+            Path sourceTreePath = tempDir.resolve("src/main/resources/application.yml");
+            when(properties.getConfigYamlPath()).thenReturn(sourceTreePath.toString());
+
+            LlmProviderConfigService sourceTreeService = newService(voiceProperties);
+
+            BusinessException exception = assertThrows(BusinessException.class,
+                sourceTreeService::validateWritablePaths);
+            assertEquals(ErrorCode.PROVIDER_CONFIG_WRITE_FAILED.getCode(), exception.getCode());
         }
     }
 
@@ -273,87 +315,7 @@ class LlmProviderConfigServiceTest {
     }
 
     @Nested
-    @DisplayName("env 文件操作")
-    class EnvFileOperations {
-
-        private LlmProviderConfigService createServiceWithEnv(Path envFile) {
-            when(properties.getConfigYamlPath()).thenReturn(null);
-            when(properties.getConfigEnvPath()).thenReturn(envFile.toString());
-            return new LlmProviderConfigService(
-                properties, registry, voiceProperties, asrService, ttsService);
-        }
-
-        @Test
-        @DisplayName("writeEnvValue 在空文件追加新键")
-        void appendNewKeyToEmptyFile(@TempDir Path tempDir) throws Exception {
-            Path envFile = tempDir.resolve(".env");
-            Files.writeString(envFile, "");
-
-            LlmProviderConfigService envService = createServiceWithEnv(envFile);
-            invokeMethod(envService, "writeEnvValue", "PROVIDER_KIMI_API_KEY", "sk-123");
-
-            String content = Files.readString(envFile, StandardCharsets.UTF_8);
-            assertTrue(content.contains("PROVIDER_KIMI_API_KEY=sk-123"));
-        }
-
-        @Test
-        @DisplayName("writeEnvValue 在已有文件追加新键并补换行")
-        void appendNewKeyToExistingFile(@TempDir Path tempDir) throws Exception {
-            Path envFile = tempDir.resolve(".env");
-            Files.writeString(envFile, "EXISTING_KEY=val1");
-
-            LlmProviderConfigService envService = createServiceWithEnv(envFile);
-            invokeMethod(envService, "writeEnvValue", "PROVIDER_KIMI_API_KEY", "sk-123");
-
-            String content = Files.readString(envFile, StandardCharsets.UTF_8);
-            assertTrue(content.contains("EXISTING_KEY=val1"));
-            assertTrue(content.contains("PROVIDER_KIMI_API_KEY=sk-123"));
-        }
-
-        @Test
-        @DisplayName("writeEnvValue 替换已有键的值")
-        void replaceExistingKey(@TempDir Path tempDir) throws Exception {
-            Path envFile = tempDir.resolve(".env");
-            Files.writeString(envFile, "PROVIDER_KIMI_API_KEY=old-value\nOTHER_KEY=x\n");
-
-            LlmProviderConfigService envService = createServiceWithEnv(envFile);
-            invokeMethod(envService, "writeEnvValue", "PROVIDER_KIMI_API_KEY", "new-value");
-
-            String content = Files.readString(envFile, StandardCharsets.UTF_8);
-            assertTrue(content.contains("PROVIDER_KIMI_API_KEY=new-value"));
-            assertTrue(content.contains("OTHER_KEY=x"));
-        }
-
-        @Test
-        @DisplayName("envPath 为 null 时不写入文件")
-        void nullEnvPathIsNoOp(@TempDir Path tempDir) throws IOException {
-            when(properties.getConfigYamlPath()).thenReturn(null);
-            when(properties.getConfigEnvPath()).thenReturn(null);
-
-            LlmProviderConfigService nullEnvService = new LlmProviderConfigService(
-                properties, registry, voiceProperties, asrService, ttsService);
-
-            assertDoesNotThrow(() -> nullEnvService.createProvider(
-                new CreateProviderRequest("test", "http://localhost", "key", "model", null, null)));
-        }
-
-        @Test
-        @DisplayName("removeFromEnv 移除指定键")
-        void removeFromEnvDeletesKey(@TempDir Path tempDir) throws Exception {
-            Path envFile = tempDir.resolve(".env");
-            Files.writeString(envFile, "PROVIDER_KIMI_API_KEY=sk-123\nKEEP_ME=yes\n");
-
-            LlmProviderConfigService envService = createServiceWithEnv(envFile);
-            invokeMethod(envService, "removeFromEnv", "PROVIDER_KIMI_API_KEY");
-
-            String content = Files.readString(envFile, StandardCharsets.UTF_8);
-            assertFalse(content.contains("PROVIDER_KIMI_API_KEY"));
-            assertTrue(content.contains("KEEP_ME=yes"));
-        }
-    }
-
-    @Nested
-    @DisplayName("YAML 文件操作")
+    @DisplayName("本机配置文件写入")
     class YamlMutations {
 
         @Test
@@ -361,10 +323,8 @@ class LlmProviderConfigServiceTest {
         void createsNewFileWhenMissing(@TempDir Path tempDir) throws IOException {
             Path yamlFile = tempDir.resolve("new-config.yml");
             when(properties.getConfigYamlPath()).thenReturn(yamlFile.toString());
-            when(properties.getConfigEnvPath()).thenReturn(null);
 
-            LlmProviderConfigService yamlService = new LlmProviderConfigService(
-                properties, registry, voiceProperties, asrService, ttsService);
+            LlmProviderConfigService yamlService = newService(voiceProperties);
 
             when(properties.getProviders()).thenReturn(new HashMap<>());
 
@@ -392,10 +352,8 @@ class LlmProviderConfigServiceTest {
                 """);
 
             when(properties.getConfigYamlPath()).thenReturn(yamlFile.toString());
-            when(properties.getConfigEnvPath()).thenReturn(null);
 
-            LlmProviderConfigService yamlService = new LlmProviderConfigService(
-                properties, registry, voiceProperties, asrService, ttsService);
+            LlmProviderConfigService yamlService = newService(voiceProperties);
 
             when(properties.getProviders()).thenReturn(new HashMap<>());
 
@@ -409,16 +367,275 @@ class LlmProviderConfigServiceTest {
         }
 
         @Test
-        @DisplayName("yamlPath 为 null 时 mutateYaml 不抛异常")
-        void nullYamlPathIsNoOp() {
+        @DisplayName("yamlPath 为 null 时拒绝静默丢弃 Provider 配置")
+        void nullYamlPathIsRejected() {
             when(properties.getConfigYamlPath()).thenReturn(null);
-            when(properties.getConfigEnvPath()).thenReturn(null);
 
-            LlmProviderConfigService nullYamlService = new LlmProviderConfigService(
-                properties, registry, voiceProperties, asrService, ttsService);
+            LlmProviderConfigService nullYamlService = newService(voiceProperties);
+            when(properties.getProviders()).thenReturn(new HashMap<>());
 
-            assertDoesNotThrow(() -> nullYamlService.createProvider(
+            assertThrows(BusinessException.class, () -> nullYamlService.createProvider(
                 new CreateProviderRequest("test", "http://localhost", "key", "model", null, null)));
+        }
+
+        @Test
+        @DisplayName("YAML 只写 ${ENV} 占位符，不出现明文 API Key")
+        void writesPlaceholderOnly(@TempDir Path tempDir) throws IOException {
+            Path yamlFile = tempDir.resolve("placeholder.yml");
+            when(properties.getConfigYamlPath()).thenReturn(yamlFile.toString());
+            when(properties.getProviders()).thenReturn(new HashMap<>());
+
+            LlmProviderConfigService yamlService = newService(voiceProperties);
+            yamlService.createProvider(new CreateProviderRequest(
+                "kimi", "https://api.moonshot.cn/v1", "sk-live-plaintext-0001", "kimi-latest", null, null));
+
+            String content = Files.readString(yamlFile, StandardCharsets.UTF_8);
+            assertTrue(content.contains("${PROVIDER_KIMI_API_KEY}"));
+            assertFalse(content.contains("sk-live-plaintext-0001"));
+        }
+
+        @Test
+        @DisplayName("写入使用原子替换，不残留临时文件")
+        void keepsNoTemporaryFiles(@TempDir Path tempDir) throws IOException {
+            Path yamlFile = tempDir.resolve("atomic.yml");
+            when(properties.getConfigYamlPath()).thenReturn(yamlFile.toString());
+            when(properties.getProviders()).thenReturn(new HashMap<>());
+
+            LlmProviderConfigService yamlService = newService(voiceProperties);
+            yamlService.createProvider(new CreateProviderRequest(
+                "kimi", "https://api.moonshot.cn/v1", "key", "kimi-latest", null, null));
+            yamlService.createProvider(new CreateProviderRequest(
+                "glm", "https://open.bigmodel.cn/api/coding/paas/v4", "key", "glm-4-flash", null, null));
+
+            String content = Files.readString(yamlFile, StandardCharsets.UTF_8);
+            assertTrue(content.contains("kimi"));
+            assertTrue(content.contains("glm"));
+            try (var entries = Files.list(tempDir)) {
+                assertTrue(entries.noneMatch(path -> path.getFileName().toString().endsWith(".tmp")));
+            }
+        }
+
+        @Test
+        @DisplayName("未配置 config-yaml-path 时语音配置只改内存并给出告警")
+        void voiceConfigSkipsFileWhenPathMissing(@TempDir Path tempDir) throws IOException {
+            when(properties.getConfigYamlPath()).thenReturn(null);
+
+            VoiceInterviewProperties realVoice = new VoiceInterviewProperties();
+            LlmProviderConfigService memoryOnlyService = newService(realVoice);
+
+            assertDoesNotThrow(() -> memoryOnlyService.updateAsrConfig(
+                new AsrConfigRequest("wss://8.8.8.8/realtime", "qwen3-asr", null, null, null,
+                    null, null, null, null, null)));
+            try (var entries = Files.list(tempDir)) {
+                assertEquals(0, entries.count());
+            }
+        }
+    }
+
+    @Nested
+    @DisplayName("敏感信息落盘防护")
+    class SensitiveInfoProtection {
+
+        @Test
+        @DisplayName("默认不写 ENV 文件，密钥不落盘")
+        void neverWritesEnvFile(@TempDir Path tempDir) throws IOException {
+            Path envFile = tempDir.resolve(".env");
+            Files.writeString(envFile, "AI_BAILIAN_API_KEY=existing\n", StandardCharsets.UTF_8);
+            lenient().when(properties.getConfigEnvPath()).thenReturn(envFile.toString());
+
+            Path yamlFile = tempDir.resolve("runtime-config.yml");
+            Files.writeString(yamlFile, RUNTIME_CONFIG_HEADER, StandardCharsets.UTF_8);
+            when(properties.getConfigYamlPath()).thenReturn(yamlFile.toString());
+
+            VoiceInterviewProperties realVoice = new VoiceInterviewProperties();
+            LlmProviderConfigService sensitiveService = newService(realVoice);
+
+            String secret = "sk-live-should-never-be-persisted";
+            sensitiveService.updateAsrConfig(
+                new AsrConfigRequest(null, null, secret, null, null, null, null, null, null, null));
+
+            assertEquals("AI_BAILIAN_API_KEY=existing\n",
+                Files.readString(envFile, StandardCharsets.UTF_8));
+            assertFalse(Files.readString(yamlFile, StandardCharsets.UTF_8).contains(secret));
+            assertTrue(Files.readString(yamlFile, StandardCharsets.UTF_8)
+                .contains("${AI_BAILIAN_API_KEY}"));
+        }
+
+        @Test
+        @DisplayName("启动时把历史明文 api-key 替换为占位符并保留其余配置")
+        void sanitizesLegacyPlaintextKeys(@TempDir Path tempDir) throws IOException {
+            Path yamlFile = tempDir.resolve("legacy.yml");
+            Files.writeString(yamlFile, """
+                app:
+                  ai:
+                    providers:
+                      kimi:
+                        base-url: https://api.moonshot.cn/v1
+                        api-key: sk-legacy-plaintext-123456
+                        model: kimi-latest
+                  voice-interview:
+                    qwen:
+                      asr:
+                        url: wss://8.8.8.8/realtime
+                        api-key: sk-voice-plaintext-abcdef
+                """, StandardCharsets.UTF_8);
+            when(properties.getConfigYamlPath()).thenReturn(yamlFile.toString());
+
+            LlmProviderConfigService legacyService = newService(voiceProperties);
+            legacyService.validateWritablePaths();
+
+            String content = Files.readString(yamlFile, StandardCharsets.UTF_8);
+            assertFalse(content.contains("sk-legacy-plaintext-123456"));
+            assertFalse(content.contains("sk-voice-plaintext-abcdef"));
+            assertTrue(content.contains("${PROVIDER_KIMI_API_KEY}"));
+            assertTrue(content.contains("${AI_BAILIAN_API_KEY}"));
+            assertTrue(content.contains("base-url"));
+            assertTrue(content.contains("kimi-latest"));
+        }
+
+        @Test
+        @DisplayName("日志中不出现明文 API Key")
+        void logsNeverContainPlaintextKey() {
+            org.slf4j.Logger candidate = LoggerFactory.getLogger(LlmProviderConfigService.class);
+            Assumptions.assumeTrue(candidate instanceof Logger,
+                "当前运行时未绑定 logback，跳过日志断言");
+            Logger logger = (Logger) candidate;
+            ListAppender<ILoggingEvent> appender = new ListAppender<>();
+            appender.start();
+            logger.addAppender(appender);
+            try {
+                VoiceInterviewProperties realVoice = new VoiceInterviewProperties();
+                LlmProviderConfigService loggingService = newService(realVoice);
+                String secret = "sk-log-should-not-appear-987654";
+                loggingService.updateAsrConfig(
+                    new AsrConfigRequest(null, null, secret, null, null, null, null, null, null, null));
+
+                assertTrue(appender.list.stream()
+                    .noneMatch(event -> event.getFormattedMessage().contains(secret)));
+                assertTrue(appender.list.stream()
+                    .anyMatch(event -> event.getFormattedMessage().contains("sk-***654")));
+            } finally {
+                logger.detachAppender(appender);
+            }
+        }
+    }
+
+    @Nested
+    @DisplayName("并发与文件权限")
+    class ConcurrencyAndPermissions {
+
+        @Test
+        @DisplayName("并发创建不同 Provider 不会互相覆盖")
+        void concurrentWritesDoNotLoseUpdates(@TempDir Path tempDir) throws Exception {
+            Path yamlFile = tempDir.resolve("concurrent.yml");
+            Files.writeString(yamlFile, RUNTIME_CONFIG_HEADER, StandardCharsets.UTF_8);
+            when(properties.getConfigYamlPath()).thenReturn(yamlFile.toString());
+
+            Map<String, LlmProviderProperties.ProviderConfig> providers = new LinkedHashMap<>();
+            when(properties.getProviders()).thenReturn(providers);
+
+            LlmProviderConfigService concurrentService = newService(voiceProperties);
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+
+            Thread alpha = new Thread(() -> createProviderQuietly(concurrentService, failure,
+                "alpha", "https://api.example.com/v1"));
+            Thread beta = new Thread(() -> createProviderQuietly(concurrentService, failure,
+                "beta", "https://api.example.com/v1"));
+            alpha.start();
+            beta.start();
+            alpha.join();
+            beta.join();
+
+            assertNull(failure.get());
+            String content = Files.readString(yamlFile, StandardCharsets.UTF_8);
+            assertTrue(content.contains("alpha"));
+            assertTrue(content.contains("beta"));
+        }
+
+        @Test
+        @DisplayName("写入后的配置文件权限为仅所有者可读写")
+        void configFileIsOwnerOnly(@TempDir Path tempDir) throws IOException {
+            Assumptions.assumeTrue(
+                FileSystems.getDefault().supportedFileAttributeViews().contains("posix"),
+                "当前文件系统不支持 POSIX 权限");
+
+            Path yamlFile = tempDir.resolve("private.yml");
+            when(properties.getConfigYamlPath()).thenReturn(yamlFile.toString());
+            when(properties.getProviders()).thenReturn(new HashMap<>());
+
+            LlmProviderConfigService privateService = newService(voiceProperties);
+            privateService.createProvider(new CreateProviderRequest(
+                "kimi", "https://api.moonshot.cn/v1", "key", "kimi-latest", null, null));
+
+            Set<PosixFilePermission> permissions = Files.getPosixFilePermissions(yamlFile);
+            assertEquals(PosixFilePermissions.fromString("rw-------"), permissions);
+        }
+
+        @Test
+        @DisplayName("热加载失败只记录告警，不影响已完成的配置写入")
+        void reloadFailureDoesNotBreakWrites(@TempDir Path tempDir) throws IOException {
+            Path yamlFile = tempDir.resolve("reload.yml");
+            when(properties.getConfigYamlPath()).thenReturn(yamlFile.toString());
+            when(properties.getProviders()).thenReturn(new HashMap<>());
+            doThrow(new IllegalStateException("cache rebuild failed")).when(registry).reload();
+
+            LlmProviderConfigService flakyService = newService(voiceProperties);
+
+            assertDoesNotThrow(() -> flakyService.createProvider(new CreateProviderRequest(
+                "kimi", "https://api.moonshot.cn/v1", "key", "kimi-latest", null, null)));
+            assertTrue(Files.readString(yamlFile, StandardCharsets.UTF_8).contains("kimi"));
+        }
+    }
+
+    @Nested
+    @DisplayName("Provider 连接安全")
+    class ProviderConnectivitySecurity {
+
+        @Test
+        @DisplayName("默认拒绝本机 Provider 测试连接，不发起请求")
+        void rejectsLocalProviderEndpoint() {
+            LlmProviderProperties.SecurityConfig security = new LlmProviderProperties.SecurityConfig();
+            when(properties.getSecurity()).thenReturn(security);
+
+            Map<String, LlmProviderProperties.ProviderConfig> providers = new LinkedHashMap<>();
+            providers.put("local", createProviderConfig("http://127.0.0.1:1234", "key", "model", null));
+            when(properties.getProviders()).thenReturn(providers);
+
+            ProviderTestResult result = service.testProvider("local");
+
+            assertFalse(result.success());
+            assertTrue(result.message().contains("拒绝"));
+        }
+
+        @Test
+        @DisplayName("默认拒绝指向内网地址的 ASR 测试连接")
+        void rejectsInternalAsrEndpoint() {
+            LlmProviderProperties.SecurityConfig security = new LlmProviderProperties.SecurityConfig();
+            when(properties.getSecurity()).thenReturn(security);
+
+            VoiceInterviewProperties realVoice = new VoiceInterviewProperties();
+            realVoice.getQwen().getAsr().setUrl("ws://10.0.0.8:9000/asr");
+            realVoice.getQwen().getAsr().setModel("qwen3-asr");
+
+            LlmProviderConfigService voiceService = newService(realVoice);
+
+            ProviderTestResult result = voiceService.testAsrConfig();
+
+            assertFalse(result.success());
+            assertTrue(result.message().contains("拒绝"));
+        }
+    }
+
+    private void createProviderQuietly(
+        LlmProviderConfigService target,
+        AtomicReference<Throwable> failure,
+        String id,
+        String baseUrl) {
+        try {
+            target.createProvider(new CreateProviderRequest(
+                id, baseUrl, "key", "model-name", null, null));
+        } catch (Throwable throwable) {
+            failure.compareAndSet(null, throwable);
         }
     }
 
@@ -445,17 +662,6 @@ class LlmProviderConfigServiceTest {
         );
         method.setAccessible(true);
         return (List<String>) method.invoke(service, baseUrl);
-    }
-
-    private void invokeMethod(Object target, String methodName, Object... args)
-        throws Exception {
-        Class<?>[] paramTypes = new Class<?>[args.length];
-        for (int i = 0; i < args.length; i++) {
-            paramTypes[i] = args[i].getClass();
-        }
-        Method method = LlmProviderConfigService.class.getDeclaredMethod(methodName, paramTypes);
-        method.setAccessible(true);
-        method.invoke(target, args);
     }
 
     @SuppressWarnings("unchecked")

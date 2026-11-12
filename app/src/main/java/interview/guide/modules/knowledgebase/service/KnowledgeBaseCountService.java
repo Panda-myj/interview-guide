@@ -4,6 +4,7 @@ import interview.guide.common.exception.BusinessException;
 import interview.guide.common.exception.ErrorCode;
 import interview.guide.modules.knowledgebase.model.KnowledgeBaseEntity;
 import interview.guide.modules.knowledgebase.repository.KnowledgeBaseRepository;
+import interview.guide.modules.auth.security.CurrentUserService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -22,6 +23,7 @@ import java.util.Set;
 public class KnowledgeBaseCountService {
 
     private final KnowledgeBaseRepository knowledgeBaseRepository;
+    private final CurrentUserService currentUserService;
 
     /**
      * 批量更新知识库提问计数（使用单条 SQL 批量更新）
@@ -39,7 +41,9 @@ public class KnowledgeBaseCountService {
         List<Long> uniqueIds = knowledgeBaseIds.stream().distinct().toList();
 
         // 验证所有知识库是否存在
-        Set<Long> existingIds = new HashSet<>(knowledgeBaseRepository.findAllById(uniqueIds)
+        Long ownerUserId = currentUserService.getRequiredUserId();
+        Set<Long> existingIds = new HashSet<>(knowledgeBaseRepository
+                .findAllByIdInAndOwnerUserId(uniqueIds, ownerUserId)
                 .stream().map(KnowledgeBaseEntity::getId).toList());
 
         for (Long id : uniqueIds) {
@@ -49,7 +53,11 @@ public class KnowledgeBaseCountService {
         }
 
         // 批量更新（单条 SQL）
-        int updated = knowledgeBaseRepository.incrementQuestionCountBatch(uniqueIds);
+        int updated = knowledgeBaseRepository.incrementQuestionCountBatch(uniqueIds, ownerUserId);
+        if (updated != uniqueIds.size()) {
+            throw new BusinessException(ErrorCode.KNOWLEDGE_BASE_QUERY_FAILED,
+                "知识库提问计数更新失败");
+        }
         log.debug("批量更新知识库提问计数: ids={}, updated={}", uniqueIds, updated);
     }
 }

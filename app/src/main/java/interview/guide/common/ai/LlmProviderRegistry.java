@@ -83,6 +83,7 @@ public class LlmProviderRegistry {
     private final ToolCallingManager toolCallingManager;
     private final ObservationRegistry observationRegistry;/*监控*/
     private final ToolCallback interviewSkillsToolCallback;/*面试技能*/
+    private final ProviderHttpProperties httpProperties;
     private static final Map<String, String> RECOMMENDED_EMBEDDING_MODELS = Map.of(
         "dashscope", "text-embedding-v3",
         "glm", "embedding-3",
@@ -105,7 +106,8 @@ public class LlmProviderRegistry {
             ApiKeyEncryptionService encryptionService,
             @Autowired(required = false) ToolCallingManager toolCallingManager,
             @Autowired(required = false) ObservationRegistry observationRegistry,
-            @Autowired(required = false) @Qualifier("interviewSkillsToolCallback") ToolCallback interviewSkillsToolCallback) {
+            @Autowired(required = false) @Qualifier("interviewSkillsToolCallback") ToolCallback interviewSkillsToolCallback,
+            @Autowired(required = false) ProviderHttpProperties httpProperties) {
         this.properties = properties;
         this.providerRepository = providerRepository;
         this.globalSettingRepository = globalSettingRepository;
@@ -113,6 +115,7 @@ public class LlmProviderRegistry {
         this.toolCallingManager = toolCallingManager;
         this.observationRegistry = observationRegistry;
         this.interviewSkillsToolCallback = interviewSkillsToolCallback;
+        this.httpProperties = httpProperties;
     }
 
     public LlmProviderRegistry(
@@ -120,7 +123,7 @@ public class LlmProviderRegistry {
             ToolCallingManager toolCallingManager,
             ObservationRegistry observationRegistry,
             ToolCallback interviewSkillsToolCallback) {
-        this(properties, null, null, null, toolCallingManager, observationRegistry, interviewSkillsToolCallback);
+        this(properties, null, null, null, toolCallingManager, observationRegistry, interviewSkillsToolCallback, null);
     }
 
     /**
@@ -145,6 +148,10 @@ public class LlmProviderRegistry {
     这一步的关键收获：ChatModel（发动机）是重量级对象，缓存了；ChatClient（方向盘）是轻量级封装，虽然也缓存了，但每次创建都会重新装配新的 Advisor（拦截器）。
                  */
     public ChatClient getChatClient(String providerId) {
+        if (isBlank(providerId)) {
+            throw new BusinessException(ErrorCode.PROVIDER_CONFIG_READ_FAILED,
+                "未指定 LLM Provider，请先配置默认 Chat Provider 或在请求中显式指定");
+        }
         return clientCache.computeIfAbsent(providerId, id -> {
             log.info("[LlmProviderRegistry] Creating new client for provider: {}", id);
             return createChatClient(id);
@@ -161,9 +168,23 @@ public class LlmProviderRegistry {
     }
 
     /**
+     * 当前默认 Chat Provider 的 ID，仅供指标标签使用。
+     *
+     * <p>指标采集不能反过来影响主流程：解析失败（未配置默认 Provider 等）时返回
+     * {@code unknown} 并记 DEBUG 日志，不抛异常、不打断问答。</p>
+     */
+    public String defaultChatProviderId() {
+        try {
+            return resolveDefaultChatProviderId();
+        } catch (RuntimeException e) {
+            log.debug("[LlmProviderRegistry] 解析默认 Chat Provider 失败，指标标签降级为 unknown: {}", e.getMessage());
+            return "unknown";
+        }
+    }
+
+    /**
      * Get a ChatClient for the specified provider, falling back to the default if null or blank.
      */
-    /*💡 学习收获：这三个方法揭示了 Spring AI 的一个实战精髓——同一个底层模型，可以通过组装不同的 Advisor 和 Tools，瞬间变身为具有不同行为特征的“特种兵”。*/
     public ChatClient getChatClientOrDefault(String providerId) {
         if (providerId != null && !providerId.isBlank()) {
             return getChatClient(providerId);
@@ -171,10 +192,7 @@ public class LlmProviderRegistry {
         return getDefaultChatClient();
     }
 
-
-    /*getPlain 和 getVoice 的缓存 Key 加了 :plain 和 :voice 后缀，这意味着同一个 Provider（如 dashscope）在 JVM 内存中会存在 3 个不同的 ChatClient 实例。
-    Plain 是给机器消费的（拿 JSON 干活），所以必须干净；Voice 是给人交互的（实时对话+调工具），所以必须灵活，连记忆都要自己管。*/
-    //TODO:这里的skllstool等从哪里看到的？从createPlainChatClient()函数可知。
+    // 同一 Provider 按 :plain/:voice 后缀缓存多个 ChatClient：plain 面向结构化输出（无工具），voice 面向实时对话（SkillsTool+ToolCallAdvisor，手动管理历史）。
     /**
      * 获取不带 SkillsTool 的 ChatClient，用于结构化输出场景（出题、简历评分等）。
      * 这些场景要求模型一次性返回可解析 JSON，不应混入工具调用消息。
@@ -272,7 +290,7 @@ public class LlmProviderRegistry {
         log.info("[LlmProviderRegistry] Building ChatModel - Provider: {}, BaseUrl: {}, Model: {}",
                  providerId, config.baseUrl(), config.model());
 
-        OpenAIClient openAiClient = ApiPathResolver.buildOpenAiClient(config.baseUrl(), config.apiKey());
+        OpenAIClient openAiClient = buildHttpClient(config);
 
         OpenAiChatOptions options = OpenAiChatOptions.builder()
                 .model(config.model())
@@ -305,7 +323,7 @@ public class LlmProviderRegistry {
         log.info("[LlmProviderRegistry] Building EmbeddingModel - Provider: {}, BaseUrl: {}, Model: {}",
             providerId, config.baseUrl(), config.embeddingModel());
 
-        OpenAIClient openAiClient = ApiPathResolver.buildOpenAiClient(config.baseUrl(), config.apiKey());
+        OpenAIClient openAiClient = buildHttpClient(config);
         OpenAiEmbeddingOptions options = OpenAiEmbeddingOptions.builder()
             .model(config.embeddingModel())
             .dimensions(resolveEmbeddingDimensions(config.embeddingDimensions()))
@@ -317,6 +335,23 @@ public class LlmProviderRegistry {
             .options(options)
             .observationRegistry(observationRegistry != null ? observationRegistry : ObservationRegistry.NOOP)
             .build();
+    }
+
+    /**
+     * 统一构造 Provider 的 HTTP 客户端，显式限制连接与读取超时。
+     * 未注入配置（单测、轻量场景）时回退到 {@link ApiPathResolver} 的默认值。
+     */
+    private OpenAIClient buildHttpClient(ProviderSnapshot config) {
+        if (httpProperties == null) {
+            return ApiPathResolver.buildOpenAiClient(config.baseUrl(), config.apiKey());
+        }
+        log.debug("[LlmProviderRegistry] Provider {} 使用超时配置: connect={}ms, read={}ms",
+            config.id(), httpProperties.connectTimeoutMillis(), httpProperties.readTimeoutMillis());
+        return ApiPathResolver.buildOpenAiClient(
+            config.baseUrl(),
+            config.apiKey(),
+            httpProperties.connectTimeoutMillis(),
+            httpProperties.readTimeoutMillis());
     }
 
     private List<Advisor> buildDefaultAdvisors(String providerId) {
@@ -381,26 +416,43 @@ public class LlmProviderRegistry {
 
     private String resolveDefaultChatProviderId() {
         if (globalSettingRepository == null) {
-            return properties.getDefaultProvider();
+            return requireDefaultProvider(properties.getDefaultProvider(), "app.ai.default-provider");
         }
         return globalSettingRepository.findById(LlmGlobalSettingEntity.SINGLETON_ID)
             .map(LlmGlobalSettingEntity::getDefaultChatProviderId)
             .filter(id -> !isBlank(id))
-            .orElse(properties.getDefaultProvider());
+            .orElseGet(() -> requireDefaultProvider(properties.getDefaultProvider(), "app.ai.default-provider"));
+    }
+
+    /**
+     * 默认 Provider 缺失属于配置错误，直接给出可定位的错误信息，避免落到空 ID 上产生难以排查的 NPE。
+     */
+    private String requireDefaultProvider(String providerId, String configKey) {
+        if (isBlank(providerId)) {
+            throw new BusinessException(ErrorCode.PROVIDER_CONFIG_READ_FAILED,
+                "未配置默认 LLM Provider，请设置 " + configKey + " 或在全局设置中选择默认模型");
+        }
+        return providerId;
     }
 
     private String resolveDefaultEmbeddingProviderId() {
         if (globalSettingRepository == null) {
-            return !isBlank(properties.getDefaultEmbeddingProvider())
-                ? properties.getDefaultEmbeddingProvider()
-                : properties.getDefaultProvider();
+            return resolveEmbeddingProviderFallback();
         }
         return globalSettingRepository.findById(LlmGlobalSettingEntity.SINGLETON_ID)
             .map(LlmGlobalSettingEntity::getDefaultEmbeddingProviderId)
             .filter(id -> !isBlank(id))
-            .orElseGet(() -> !isBlank(properties.getDefaultEmbeddingProvider())
-                ? properties.getDefaultEmbeddingProvider()
-                : properties.getDefaultProvider());
+            .orElseGet(this::resolveEmbeddingProviderFallback);
+    }
+
+    /**
+     * Embedding 默认 Provider 回退顺序：app.ai.default-embedding-provider → app.ai.default-provider。
+     */
+    private String resolveEmbeddingProviderFallback() {
+        if (!isBlank(properties.getDefaultEmbeddingProvider())) {
+            return properties.getDefaultEmbeddingProvider();
+        }
+        return requireDefaultProvider(properties.getDefaultProvider(), "app.ai.default-embedding-provider");
     }
 
     /*双源策略：providerRepository 不为空则查数据库（动态生效），否则读 YAML（快速启动）。这种 “数据库优先，配置文件兜底” 的设计在企业级应用中非常经典。*/
@@ -410,7 +462,8 @@ public class LlmProviderRegistry {
         }
         LlmProviderEntity entity = providerRepository.findById(providerId)
             .filter(LlmProviderEntity::isEnabled)
-            .orElseThrow(() -> new IllegalArgumentException("Unknown LLM provider: " + providerId));
+            .orElseThrow(() -> new BusinessException(ErrorCode.PROVIDER_CONFIG_READ_FAILED,
+                "未找到可用的 LLM Provider 配置或该 Provider 已被禁用: " + providerId));
         return new ProviderSnapshot(
             entity.getId(),
             entity.getBaseUrl(),
@@ -424,10 +477,12 @@ public class LlmProviderRegistry {
     }
 
     private ProviderSnapshot loadProviderFromPropertiesOrThrow(String providerId) {
-        ProviderConfig config = properties.getProviders().get(providerId);
+        Map<String, ProviderConfig> providers = properties.getProviders();
+        ProviderConfig config = providers == null ? null : providers.get(providerId);
         if (config == null) {
             log.error("[LlmProviderRegistry] Provider config not found: {}", providerId);
-            throw new IllegalArgumentException("Unknown LLM provider: " + providerId);
+            throw new BusinessException(ErrorCode.PROVIDER_CONFIG_READ_FAILED,
+                "未找到 LLM Provider 配置: " + providerId);
         }
         boolean supportsEmbedding = Boolean.TRUE.equals(config.getSupportsEmbedding())
             || !isBlank(config.getEmbeddingModel());

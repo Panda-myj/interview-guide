@@ -85,10 +85,19 @@ public class VoiceEvaluateStreamConsumer extends AbstractStreamConsumer<VoiceEva
             .orElse(true);
     }
 
+    /**
+     * 条件占位：PENDING → PROCESSING。
+     * 返回 false 表示消息重复、乱序或已被其它实例抢占，直接 ACK 丢弃。
+     */
+    @Override
+    protected boolean tryClaimProcessing(VoiceEvaluatePayload payload) {
+        return voiceInterviewService.claimEvaluationProcessing(payload.sessionId());
+    }
+
     @Override
     protected void markProcessing(VoiceEvaluatePayload payload) {
-        voiceInterviewService.updateEvaluateStatus(
-                payload.sessionId(), AsyncTaskStatus.PROCESSING, null);
+        // 条件占位由 tryClaimProcessing 完成；此处保留实现以兼容模板默认路径
+        voiceInterviewService.claimEvaluationProcessing(payload.sessionId());
     }
 
     @Override
@@ -104,19 +113,25 @@ public class VoiceEvaluateStreamConsumer extends AbstractStreamConsumer<VoiceEva
 
     @Override
     protected void markCompleted(VoiceEvaluatePayload payload) {
-        voiceInterviewService.updateEvaluateStatus(
-                payload.sessionId(), AsyncTaskStatus.COMPLETED, null);
+        voiceInterviewService.completeEvaluation(payload.sessionId());
     }
 
     @Override
     protected void markFailed(VoiceEvaluatePayload payload, String error) {
-        voiceInterviewService.updateEvaluateStatus(
-                payload.sessionId(), AsyncTaskStatus.FAILED, error);
+        voiceInterviewService.failEvaluation(payload.sessionId(), error);
     }
 
     @Override
     protected void retryMessage(VoiceEvaluatePayload payload, int retryCount) {
         Long sessionId = payload.sessionId();
+
+        // PROCESSING → PENDING 条件回退；失败说明任务已完成或状态被其它实例修改，不再重复入队
+        if (!voiceInterviewService.resetEvaluationForRetry(sessionId)) {
+            log.info("语音评估任务状态不可回退，放弃重试: sessionId={}, retryCount={}",
+                sessionId, retryCount);
+            return;
+        }
+
         try {
             Map<String, String> message = Map.of(
                 AsyncTaskStreamConstants.FIELD_VOICE_SESSION_ID, sessionId.toString(),
@@ -130,9 +145,9 @@ public class VoiceEvaluateStreamConsumer extends AbstractStreamConsumer<VoiceEva
             );
             log.info("语音面试评估任务已重新入队: sessionId={}, retryCount={}", sessionId, retryCount);
         } catch (Exception e) {
-            log.error("重试入队失败: sessionId={}, error={}", sessionId, e.getMessage(), e);
-            voiceInterviewService.updateEvaluateStatus(
-                    sessionId, AsyncTaskStatus.FAILED, truncateError("重试入队失败: " + e.getMessage()));
+            log.error("重试入队失败: sessionId={}, retryCount={}", sessionId, retryCount, e);
+            voiceInterviewService.failEvaluation(
+                sessionId, truncateError("重试入队失败: " + e.getMessage()));
         }
     }
 }

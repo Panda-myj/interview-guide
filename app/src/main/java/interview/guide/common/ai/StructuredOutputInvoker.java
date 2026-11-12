@@ -71,9 +71,13 @@ public class StructuredOutputInvoker {
     private final boolean metricsEnabled;
     private final boolean schemaValidationEnabled;
     private final MeterRegistry meterRegistry;
+    private final LlmResilienceProperties resilienceProperties;
+    private final AiCircuitBreaker circuitBreaker;
 
     public StructuredOutputInvoker(
             StructuredOutputProperties properties,
+            LlmResilienceProperties resilienceProperties,
+            AiCircuitBreaker circuitBreaker,
             @Autowired(required = false) MeterRegistry meterRegistry
     ) {
         this.maxAttempts = Math.max(1, properties.getStructuredMaxAttempts());
@@ -84,6 +88,8 @@ public class StructuredOutputInvoker {
         this.metricsEnabled = properties.isStructuredMetricsEnabled();
         this.schemaValidationEnabled = properties.isStructuredSchemaValidationEnabled();
         this.meterRegistry = meterRegistry;
+        this.resilienceProperties = resilienceProperties;
+        this.circuitBreaker = circuitBreaker;
     }
 
 
@@ -107,42 +113,82 @@ public class StructuredOutputInvoker {
             String logContext,
             Logger log
     ) {
-        /*在Java中，System.currentTimeMillis() 和 System.nanoTime() 都能获取时间，但用途和特性完全不同。
-        前者返回自1970-01-01 UTC以来的毫秒数，基于系统时钟，适合记录绝对时间（如日志、业务时间戳）；
-        后者返回高精度、单调递增的纳秒计数，基于系统计时器，适合测量时间间隔。*/
+        // 测耗时用 nanoTime（单调递增），不要用 currentTimeMillis（受系统时钟回拨影响）
         long startNanos = System.nanoTime();
         String contextTag = normalizeContextTag(logContext);
         String securedSystemPrompt = systemPromptWithFormat
                 + PromptSecurityConstants.ANTI_INJECTION_INSTRUCTION;/*安全加固*/
+        circuitBreaker.acquire(contextTag);
         Exception lastError = null;
-        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+        AiCallClassifier.Assessment lastAssessment = null;
+        int effectiveMaxAttempts = resilienceProperties.isRetryEnabled() ? maxAttempts : 1;
+        for (int attempt = 1; attempt <= effectiveMaxAttempts; attempt++) {
             String attemptSystemPrompt = attempt == 1
                     ? securedSystemPrompt
                     : buildRetrySystemPrompt(securedSystemPrompt, lastError);
             try {
                 T result = callStructuredOutput(
                         chatClient, attemptSystemPrompt, userPrompt, outputConverter, logContext, log);
+                circuitBreaker.recordSuccess(contextTag);
                 recordAttempt(contextTag, STATUS_SUCCESS);
                 recordInvocation(contextTag, STATUS_SUCCESS, startNanos);
                 return result;
             } catch (Exception e) {
                 lastError = e;
+                lastAssessment = AiCallClassifier.classify(e);
                 recordAttempt(contextTag, STATUS_FAILURE);
-                if (attempt < maxAttempts) {
-                    log.warn("{}结构化解析失败，准备重试: attempt={}/{}, error={}",
-                            logContext, attempt, maxAttempts, e.getMessage());
+                if (lastAssessment.availabilityFailure()) {
+                    circuitBreaker.recordFailure(contextTag);
+                }
+                boolean retryable = lastAssessment.retryable()
+                        && resilienceProperties.isRetryEnabled()
+                        && attempt < effectiveMaxAttempts;
+                if (retryable) {
+                    log.warn("{}调用失败，{}ms 后重试: attempt={}/{}, category={}, error={}",
+                            logContext,
+                            resilienceProperties.backoffMillis(attempt),
+                            attempt,
+                            effectiveMaxAttempts,
+                            lastAssessment.category(),
+                            e.getMessage());
+                    backoffBeforeRetry(attempt);
                 } else {
-                    log.error("{}结构化解析失败，已达最大重试次数: attempts={}, error={}",
-                            logContext, maxAttempts, e.getMessage());
+                    log.error("{}调用失败且不再重试: attempt={}/{}, category={}, error={}",
+                            logContext, attempt, effectiveMaxAttempts,
+                            lastAssessment.category(), e.getMessage());
+                }
+                if (!retryable) {
+                    break;
                 }
             }
         }
 
         recordInvocation(contextTag, STATUS_FAILURE, startNanos);
-        throw new BusinessException(
-                errorCode,
-                errorPrefix + (lastError != null ? lastError.getMessage() : "unknown")
-        );
+        throw buildFinalException(errorCode, errorPrefix, lastError, lastAssessment);
+    }
+
+    private void backoffBeforeRetry(int failedAttempts) {
+        long waitMillis = resilienceProperties.backoffMillis(failedAttempts);
+        try {
+            Thread.sleep(waitMillis);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new BusinessException(ErrorCode.AI_SERVICE_ERROR, "AI 调用重试等待被中断", interrupted);
+        }
+    }
+
+    private BusinessException buildFinalException(
+            ErrorCode errorCode,
+            String errorPrefix,
+            Exception lastError,
+            AiCallClassifier.Assessment lastAssessment
+    ) {
+        String detail = lastError != null ? lastError.getMessage() : "unknown";
+        ErrorCode classifiedCode = lastAssessment != null ? lastAssessment.errorCode() : null;
+        if (classifiedCode != null) {
+            return new BusinessException(classifiedCode, classifiedCode.getMessage() + "：" + detail);
+        }
+        return new BusinessException(errorCode, errorPrefix + detail);
     }
 
     private <T> T callStructuredOutput(

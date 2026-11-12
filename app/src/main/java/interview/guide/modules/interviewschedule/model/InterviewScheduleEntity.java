@@ -1,5 +1,6 @@
 package interview.guide.modules.interviewschedule.model;
 
+import interview.guide.modules.auth.model.UserEntity;
 import jakarta.persistence.*;
 import lombok.Data;
 import java.time.LocalDateTime;
@@ -11,6 +12,10 @@ public class InterviewScheduleEntity {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
+
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "owner_user_id", nullable = false)
+    private UserEntity ownerUser;
 
     @Column(name = "company_name", nullable = false)
     private String companyName;

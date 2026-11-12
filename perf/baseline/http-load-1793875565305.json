@@ -1,0 +1,23 @@
+{
+  "path": "/api/interview/sessions?page=0&size=20",
+  "startedAt": "2026-11-05T10:45:05.270Z",
+  "finishedAt": "2026-11-05T10:46:05.302Z",
+  "concurrency": 10,
+  "durationMs": 60000,
+  "requests": 15095,
+  "ok": 0,
+  "errors": 15095,
+  "errorRate": 1,
+  "rps": 251.58,
+  "latencyP50": 38.7,
+  "latencyP95": 57.8,
+  "latencyP99": 69.9,
+  "latencyMax": 296.2,
+  "sampleErrors": [
+    "status=200 code=500 msg=系统繁忙，请稍后重试",
+    "status=200 code=500 msg=系统繁忙，请稍后重试",
+    "status=200 code=500 msg=系统繁忙，请稍后重试",
+    "status=200 code=500 msg=系统繁忙，请稍后重试",
+    "status=200 code=500 msg=系统繁忙，请稍后重试"
+  ]
+}

@@ -1,7 +1,11 @@
 package interview.guide.modules.knowledgebase.service;
 
+import interview.guide.common.ai.AiCallClassifier;
+import interview.guide.common.ai.AiCircuitBreaker;
 import interview.guide.common.ai.LlmProviderRegistry;
 import interview.guide.common.ai.PromptSecurityConstants;
+import interview.guide.common.ai.PromptSanitizer;
+import interview.guide.common.ai.RagContextBuilder;
 import interview.guide.common.exception.BusinessException;
 import interview.guide.common.exception.ErrorCode;
 import interview.guide.modules.knowledgebase.model.QueryRequest;
@@ -13,6 +17,7 @@ import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.prompt.PromptTemplate;
 import org.springframework.ai.document.Document;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.io.ResourceLoader;
 import org.springframework.stereotype.Service;
 import reactor.core.Disposable;
@@ -26,8 +31,10 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
+import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 知识库查询服务
@@ -39,6 +46,12 @@ public class KnowledgeBaseQueryService {
     private static final String NO_RESULT_RESPONSE = "抱歉，在选定的知识库中未检索到相关信息。请换一个更具体的关键词或补充上下文后再试。";
     private static final int STREAM_PROBE_CHARS = 120;
     private static final int MAX_REWRITE_HISTORY_CHAR = 200;
+    /** 知识库问答的熔断键：同一场景共用一条熔断窗口。 */
+    private static final String RAG_CIRCUIT_KEY = "knowledgebase_answer";
+    /** 引用 ID 形如 [S1]、[S12]。 */
+    private static final Pattern CITATION_PATTERN = Pattern.compile("\\[S(\\d+)]");
+    /** 流式回答只保留前 4000 字用于引用统计，避免长回答占用内存。 */
+    private static final int MAX_CITATION_SCAN_CHARS = 4000;
 
     private final LlmProviderRegistry llmProviderRegistry;
     private final KnowledgeBaseVectorService vectorService;
@@ -54,7 +67,31 @@ public class KnowledgeBaseQueryService {
     private final int topkLong;
     private final double minScoreShort;
     private final double minScoreDefault;
+    private final RagContextBuilder ragContextBuilder;
+    private final AiCircuitBreaker circuitBreaker;
+    private final RagMetrics ragMetrics;
+    private final int maxQuestionChars;
+    private final int maxHistoryMessages;
+    private final int maxHistoryMessageChars;
 
+    @Autowired
+    public KnowledgeBaseQueryService(
+            LlmProviderRegistry llmProviderRegistry,
+            KnowledgeBaseVectorService vectorService,
+            KnowledgeBaseListService listService,
+            KnowledgeBaseCountService countService,
+            KnowledgeBaseQueryProperties queryProperties,
+            ResourceLoader resourceLoader,
+            PromptSanitizer promptSanitizer,
+            AiCircuitBreaker circuitBreaker,
+            RagMetrics ragMetrics) throws IOException {
+        this(llmProviderRegistry, vectorService, listService, countService, queryProperties,
+            resourceLoader, promptSanitizer, circuitBreaker, ragMetrics, queryProperties.getContext());
+    }
+
+    /**
+     * 兼容旧装配方式（单测无 Spring 容器时使用）：不做 Prompt 净化、熔断与指标采集。
+     */
     public KnowledgeBaseQueryService(
             LlmProviderRegistry llmProviderRegistry,
             KnowledgeBaseVectorService vectorService,
@@ -62,6 +99,21 @@ public class KnowledgeBaseQueryService {
             KnowledgeBaseCountService countService,
             KnowledgeBaseQueryProperties queryProperties,
             ResourceLoader resourceLoader) throws IOException {
+        this(llmProviderRegistry, vectorService, listService, countService, queryProperties,
+            resourceLoader, null, null, null, queryProperties.getContext());
+    }
+
+    private KnowledgeBaseQueryService(
+            LlmProviderRegistry llmProviderRegistry,
+            KnowledgeBaseVectorService vectorService,
+            KnowledgeBaseListService listService,
+            KnowledgeBaseCountService countService,
+            KnowledgeBaseQueryProperties queryProperties,
+            ResourceLoader resourceLoader,
+            PromptSanitizer promptSanitizer,
+            AiCircuitBreaker circuitBreaker,
+            RagMetrics ragMetrics,
+            KnowledgeBaseQueryProperties.Context context) throws IOException {
         this.llmProviderRegistry = llmProviderRegistry;
         this.vectorService = vectorService;
         this.listService = listService;
@@ -85,6 +137,16 @@ public class KnowledgeBaseQueryService {
         this.topkLong = queryProperties.getSearch().getTopkLong();
         this.minScoreShort = queryProperties.getSearch().getMinScoreShort();
         this.minScoreDefault = queryProperties.getSearch().getMinScoreDefault();
+        this.ragContextBuilder = new RagContextBuilder(
+            promptSanitizer,
+            context.getMaxDocs(),
+            context.getMaxCharsPerDoc(),
+            context.getMaxTotalChars());
+        this.circuitBreaker = circuitBreaker;
+        this.ragMetrics = ragMetrics == null ? RagMetrics.disabled() : ragMetrics;
+        this.maxQuestionChars = context.getMaxQuestionChars();
+        this.maxHistoryMessages = Math.max(0, queryProperties.getHistory().getMaxMessages());
+        this.maxHistoryMessageChars = context.getMaxHistoryMessageChars();
     }
 
     private ChatClient getChatClient() {
@@ -115,22 +177,32 @@ public class KnowledgeBaseQueryService {
             return NO_RESULT_RESPONSE;
         }
 
-        countService.updateQuestionCounts(knowledgeBaseIds);
+        if (knowledgeBaseIds == null || knowledgeBaseIds.isEmpty()) {
+            throw new BusinessException(ErrorCode.KNOWLEDGE_BASE_NOT_FOUND, "知识库不存在");
+        }
+        listService.requireOwned(knowledgeBaseIds);
 
+        String kbTag = RagMetrics.kbTag(knowledgeBaseIds);
         QueryContext queryContext = buildQueryContext(question, List.of());
         List<Document> relevantDocs = retrieveRelevantDocs(queryContext, knowledgeBaseIds);
 
         if (!hasEffectiveHit(relevantDocs)) {
+            ragMetrics.recordResponse(kbTag, "no_result");
             return NO_RESULT_RESPONSE;
         }
 
-        String context = relevantDocs.stream()
-                .map(Document::getText)
-                .collect(Collectors.joining("\n\n---\n\n"));
+        // 计数语义：只有真正检索到有效内容并参与回答时才 +1。
+        // 放在检索之后，保证检索失败不会留下与结果不一致的计数。
+        countService.updateQuestionCounts(knowledgeBaseIds);
+
+        List<RagContextBuilder.RagSnippet> snippets = ragContextBuilder.buildSnippets(relevantDocs);
+        String context = ragContextBuilder.renderContext(snippets);
+        String sourceFooter = ragContextBuilder.renderSourceFooter(snippets);
 
         String systemPrompt = buildSystemPrompt();
         String userPrompt = buildUserPrompt(context, question);
 
+        acquireCircuit();
         try {
             String answer = getChatClient().prompt()
                     .system(systemPrompt)
@@ -138,11 +210,20 @@ public class KnowledgeBaseQueryService {
                     .call()
                     .content();
             answer = normalizeAnswer(answer);
+            recordCircuitSuccess();
 
-            log.info("知识库问答完成: kbIds={}", knowledgeBaseIds);
-            return answer;
+            if (NO_RESULT_RESPONSE.equals(answer)) {
+                ragMetrics.recordResponse(kbTag, "no_result");
+                return answer;
+            }
+            recordCitation(kbTag, answer, snippets);
+            ragMetrics.recordResponse(kbTag, "answer");
+
+            log.info("知识库问答完成: kbIds={}, sources={}", knowledgeBaseIds, snippets.size());
+            return answer + sourceFooter;
 
         } catch (Exception e) {
+            recordCircuitFailure(e);
             log.error("知识库问答失败: {}", e.getMessage(), e);
             throw new BusinessException(ErrorCode.KNOWLEDGE_BASE_QUERY_FAILED, "知识库查询失败：" + e.getMessage());
         }
@@ -162,8 +243,72 @@ public class KnowledgeBaseQueryService {
     private String buildUserPrompt(String context, String question) {
         Map<String, Object> variables = new HashMap<>();
         variables.put("context", context);
-        variables.put("question", question);
+        // 用户问题在进入提示词前统一净化 + 截断，避免注入与超长输入放大费用。
+        variables.put("question", ragContextBuilder.sanitizeQuestion(question, maxQuestionChars));
         return userPromptTemplate.render(variables);
+    }
+
+    /**
+     * 记录引用命中：citedCount 为回答中出现的引用 ID 数（含虚构的越界 ID），
+     * matchedDocIds 只包含真实命中注入片段的文档，二者差值即「引用幻觉」。
+     */
+    private void recordCitation(String kbTag, String answer, List<RagContextBuilder.RagSnippet> snippets) {
+        if (answer == null || answer.isBlank() || snippets == null || snippets.isEmpty()) {
+            ragMetrics.recordCitation(kbTag, 0, snippets == null ? 0 : snippets.size(), List.of());
+            return;
+        }
+        Set<Integer> citedIndexes = new TreeSet<>();
+        Matcher matcher = CITATION_PATTERN.matcher(answer);
+        while (matcher.find()) {
+            try {
+                citedIndexes.add(Integer.parseInt(matcher.group(1)));
+            } catch (NumberFormatException ignored) {
+                // 非法编号直接忽略，不影响其它引用统计
+            }
+        }
+        List<String> matchedDocIds = new ArrayList<>();
+        for (Integer index : citedIndexes) {
+            if (index != null && index >= 1 && index <= snippets.size()) {
+                String docId = snippets.get(index - 1).docId();
+                if (docId != null && !docId.isBlank()) {
+                    matchedDocIds.add(docId);
+                }
+            }
+        }
+        ragMetrics.recordCitation(kbTag, citedIndexes.size(), snippets.size(), matchedDocIds);
+    }
+
+    /**
+     * 流式回答分段到达，累积前 {@value #MAX_CITATION_SCAN_CHARS} 字用于结束时的引用统计。
+     * 超出部分直接丢弃：引用标记几乎总在回答前半段，继续累积只会放大内存。
+     */
+    private void accumulateForCitationScan(StringBuilder buffer, String chunk) {
+        if (chunk == null || chunk.isEmpty() || buffer.length() >= MAX_CITATION_SCAN_CHARS) {
+            return;
+        }
+        int remaining = MAX_CITATION_SCAN_CHARS - buffer.length();
+        buffer.append(chunk.length() <= remaining ? chunk : chunk.substring(0, remaining));
+    }
+
+    private void acquireCircuit() {
+        if (circuitBreaker != null) {
+            circuitBreaker.acquire(RAG_CIRCUIT_KEY);
+        }
+    }
+
+    private void recordCircuitSuccess() {
+        if (circuitBreaker != null) {
+            circuitBreaker.recordSuccess(RAG_CIRCUIT_KEY);
+        }
+    }
+
+    private void recordCircuitFailure(Throwable error) {
+        if (circuitBreaker == null) {
+            return;
+        }
+        if (AiCallClassifier.classify(error).availabilityFailure()) {
+            circuitBreaker.recordFailure(RAG_CIRCUIT_KEY);
+        }
     }
 
     /**
@@ -209,8 +354,12 @@ public class KnowledgeBaseQueryService {
         }
 
         try {
-            // 1. 验证知识库是否存在并更新问题计数
-            countService.updateQuestionCounts(knowledgeBaseIds);
+            if (knowledgeBaseIds == null || knowledgeBaseIds.isEmpty()) {
+                return Flux.just("【错误】知识库查询失败：请选择至少一个知识库。");
+            }
+            long startedAt = System.nanoTime();
+            String kbTag = RagMetrics.kbTag(knowledgeBaseIds);
+            listService.requireOwned(knowledgeBaseIds);
 
             // 2. Query rewrite + 动态参数检索
             List<Message> effectiveHistory = sanitizeHistory(history);
@@ -218,21 +367,27 @@ public class KnowledgeBaseQueryService {
             List<Document> relevantDocs = retrieveRelevantDocs(queryContext, knowledgeBaseIds);
 
             if (!hasEffectiveHit(relevantDocs)) {
+                ragMetrics.recordResponse(kbTag, "no_result");
                 return Flux.just(NO_RESULT_RESPONSE);
             }
 
-            // 3. 构建上下文
-            String context = relevantDocs.stream()
-                    .map(Document::getText)
-                    .collect(Collectors.joining("\n\n---\n\n"));
+            // 计数语义：检索成功后、真正生成回答前 +1，避免检索失败导致计数与结果不一致。
+            countService.updateQuestionCounts(knowledgeBaseIds);
 
-            log.debug("检索到 {} 个相关文档片段", relevantDocs.size());
+            // 3. 构建上下文（带 [S#] 引用标记 + 长度上限，文档内容视为不可信数据）
+            List<RagContextBuilder.RagSnippet> snippets = ragContextBuilder.buildSnippets(relevantDocs);
+            String context = ragContextBuilder.renderContext(snippets);
+            String sourceFooter = ragContextBuilder.renderSourceFooter(snippets);
+
+            log.debug("检索到 {} 个相关文档片段，实际注入 {} 段（{}）",
+                relevantDocs.size(), snippets.size(), ragContextBuilder.describeLimits());
 
             // 4. 构建提示词
             String systemPrompt = buildSystemPrompt();
             String userPrompt = buildUserPrompt(context, question);
 
             // 5. 流式调用（带历史上下文）+ 探测窗口归一化
+            acquireCircuit();
             var promptSpec = getChatClient().prompt().system(systemPrompt);
             if (!effectiveHistory.isEmpty()) {
                 promptSpec = promptSpec.messages(effectiveHistory);
@@ -243,9 +398,29 @@ public class KnowledgeBaseQueryService {
                     .content();
 
             log.info("开始流式输出知识库回答(探测窗口): kbIds={}", knowledgeBaseIds);
-            return normalizeStreamOutput(responseFlux)
-                .doOnComplete(() -> log.info("流式输出完成: kbIds={}", knowledgeBaseIds))
+            // 无结果模板不追加来源清单，正常回答在流结束时补上确定来源
+            AtomicBoolean noResult = new AtomicBoolean(false);
+            AtomicBoolean firstTokenRecorded = new AtomicBoolean(false);
+            // 只保留前 MAX_CITATION_SCAN_CHARS 字用于引用统计，长回答不占额外内存
+            StringBuilder citationBuffer = new StringBuilder();
+            String providerTag = llmProviderRegistry.defaultChatProviderId();
+            return normalizeStreamOutput(responseFlux, noResult)
+                .doOnNext(chunk -> {
+                    if (firstTokenRecorded.compareAndSet(false, true)) {
+                        ragMetrics.recordFirstToken(System.nanoTime() - startedAt, kbTag, providerTag);
+                    }
+                    accumulateForCitationScan(citationBuffer, chunk);
+                })
+                .concatWith(Flux.defer(() -> noResult.get() ? Flux.empty() : Flux.just(sourceFooter)))
+                .doOnComplete(() -> {
+                    recordCircuitSuccess();
+                    recordCitation(kbTag, citationBuffer.toString(), snippets);
+                    ragMetrics.recordResponse(kbTag, noResult.get() ? "no_result" : "answer");
+                    log.info("流式输出完成: kbIds={}", knowledgeBaseIds);
+                })
                 .onErrorResume(e -> {
+                    recordCircuitFailure(e);
+                    ragMetrics.recordResponse(kbTag, "error");
                     log.error("流式输出失败: kbIds={}, error={}", knowledgeBaseIds, e.getMessage(), e);
                     return Flux.just("【错误】知识库查询失败：AI服务暂时不可用，请稍后重试。");
                 });
@@ -267,11 +442,30 @@ public class KnowledgeBaseQueryService {
         return new QueryContext(normalizedQuestion, new ArrayList<>(candidates), searchParams);
     }
 
+    /**
+     * 历史消息属于用户可控输入：限制条数、逐条净化并截断，避免注入与超长上下文。
+     */
     private List<Message> sanitizeHistory(List<Message> history) {
         if (history == null || history.isEmpty()) {
             return List.of();
         }
-        return history;
+        int fromIndex = Math.max(0, history.size() - maxHistoryMessages);
+        List<Message> sanitized = new ArrayList<>(history.size() - fromIndex);
+        for (Message message : history.subList(fromIndex, history.size())) {
+            if (message == null) {
+                continue;
+            }
+            String text = ragContextBuilder.sanitizeHistoryText(message.getText(), maxHistoryMessageChars);
+            if (text.isBlank()) {
+                continue;
+            }
+            if (message instanceof AssistantMessage) {
+                sanitized.add(new AssistantMessage(text));
+            } else {
+                sanitized.add(new UserMessage(text));
+            }
+        }
+        return sanitized;
     }
 
 //       清洗
@@ -288,6 +482,7 @@ public class KnowledgeBaseQueryService {
             List<Document> docs = vectorService.similaritySearch(
                 candidateQuery,
                 knowledgeBaseIds,
+                currentOwnerUserId(),
                 queryContext.searchParams().topK(),
                 queryContext.searchParams().minScore()
             );
@@ -297,6 +492,10 @@ public class KnowledgeBaseQueryService {
             }
         }
         return List.of();
+    }
+
+    private Long currentOwnerUserId() {
+        return listService.getOwnerUserId();
     }
 
     private SearchParams resolveSearchParams(String question) {
@@ -313,6 +512,7 @@ public class KnowledgeBaseQueryService {
 //    改写
     private String rewriteQuestion(String question, List<Message> history) {
         if (!rewriteEnabled || question.isBlank()) {
+            ragMetrics.recordRewrite("skipped");
             return question;
         }
         try {
@@ -325,12 +525,15 @@ public class KnowledgeBaseQueryService {
                 .call()
                 .content();
             if (rewritten == null || rewritten.isBlank()) {
+                ragMetrics.recordRewrite("failure");
                 return question;
             }
             String normalized = rewritten.trim();
+            ragMetrics.recordRewrite("success");
             log.info("Query rewrite: origin='{}', rewritten='{}', historySize={}", question, normalized, history.size());
             return normalized;
         } catch (Exception e) {
+            ragMetrics.recordRewrite("failure");
             log.warn("Query rewrite 失败，使用原问题继续检索: {}", e.getMessage());
             return question;
         }
@@ -393,9 +596,10 @@ public class KnowledgeBaseQueryService {
      * 如果是则截断流并返回固定响应；否则将流原样透传。
      *
      * @param rawFlux 原始的字符串 Flux 流
+     * @param noResultFlag 输出是否为“未检索到相关信息”模板，供调用方决定是否追加来源清单
      * @return 经过探测和规范化处理后的 Flux 流
      */
-    private Flux<String> normalizeStreamOutput(Flux<String> rawFlux) {
+    private Flux<String> normalizeStreamOutput(Flux<String> rawFlux, AtomicBoolean noResultFlag) {
         // 使用 Flux.create 创建自定义的 Flux，允许手动控制数据的发射和完成
         return Flux.create(sink -> {
 
@@ -435,6 +639,7 @@ public class KnowledgeBaseQueryService {
                         if (isNoResultLike(probeText)) {
                             // 确认为无结果响应：标记已完成
                             completed.set(true);
+                            noResultFlag.set(true);
 
                             // 向下游发射预设的无结果响应消息
                             sink.next(NO_RESULT_RESPONSE);
@@ -475,7 +680,9 @@ public class KnowledgeBaseQueryService {
                         // 如果从未进入透传模式（说明数据量小于探测阈值）
                         if (!passthrough.get()) {
                             // 对缓冲区中的完整内容进行规范化处理后发射
-                            sink.next(normalizeAnswer(probeBuffer.toString()));
+                            String normalized = normalizeAnswer(probeBuffer.toString());
+                            noResultFlag.set(NO_RESULT_RESPONSE.equals(normalized));
+                            sink.next(normalized);
                         }
 
                         // 完成整个 Flux

@@ -1,0 +1,15 @@
+# 本地调试专用 override：为 docker-compose.dev.yml 恢复宿主机端口映射。
+# 仅用于 ./gradlew :app:bootRun 直连 localhost 依赖（README 开发约定）。
+# 不属于交付物，请勿提交。用法：
+#   docker compose -f docker-compose.dev.yml -f docker-compose.dev.local.yml up -d
+services:
+  postgres:
+    ports:
+      - "5432:5432"
+  redis:
+    ports:
+      - "6380:6379"
+  rustfs:
+    ports:
+      - "9000:9000"
+      - "9001:9001"

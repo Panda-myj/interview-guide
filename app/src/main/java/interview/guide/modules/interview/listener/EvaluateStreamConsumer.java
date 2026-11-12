@@ -12,6 +12,7 @@ import interview.guide.modules.interview.model.InterviewSessionEntity;
 import interview.guide.modules.interview.repository.InterviewSessionRepository;
 import interview.guide.modules.interview.service.AnswerEvaluationService;
 import interview.guide.modules.interview.service.InterviewPersistenceService;
+import interview.guide.modules.interview.service.InterviewSessionService;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.stream.StreamMessageId;
 import org.springframework.ai.chat.client.ChatClient;
@@ -36,6 +37,7 @@ public class EvaluateStreamConsumer extends AbstractStreamConsumer<EvaluateStrea
     private final InterviewPersistenceService persistenceService;
     private final ObjectMapper objectMapper;
     private final LlmProviderRegistry llmProviderRegistry;
+    private final InterviewSessionService sessionService;
 
     public EvaluateStreamConsumer(
         RedisService redisService,
@@ -43,7 +45,8 @@ public class EvaluateStreamConsumer extends AbstractStreamConsumer<EvaluateStrea
         AnswerEvaluationService evaluationService,
         InterviewPersistenceService persistenceService,
         ObjectMapper objectMapper,
-        LlmProviderRegistry llmProviderRegistry
+        LlmProviderRegistry llmProviderRegistry,
+        InterviewSessionService sessionService
     ) {
         super(redisService);
         this.sessionRepository = sessionRepository;
@@ -51,6 +54,7 @@ public class EvaluateStreamConsumer extends AbstractStreamConsumer<EvaluateStrea
         this.persistenceService = persistenceService;
         this.objectMapper = objectMapper;
         this.llmProviderRegistry = llmProviderRegistry;
+        this.sessionService = sessionService;
     }
 
     record EvaluatePayload(String sessionId) {}
@@ -102,9 +106,19 @@ public class EvaluateStreamConsumer extends AbstractStreamConsumer<EvaluateStrea
             .orElse(true);
     }
 
+    /**
+     * 条件占位：PENDING → PROCESSING。
+     * 返回 false 表示消息重复、乱序或已被其它实例抢占，直接 ACK 丢弃。
+     */
+    @Override
+    protected boolean tryClaimProcessing(EvaluatePayload payload) {
+        return sessionService.claimEvaluationProcessing(payload.sessionId());
+    }
+
     @Override
     protected void markProcessing(EvaluatePayload payload) {
-        updateEvaluateStatus(payload.sessionId(), AsyncTaskStatus.PROCESSING, null);
+        // 条件占位由 tryClaimProcessing 完成；此处保留实现以兼容模板默认路径
+        sessionService.claimEvaluationProcessing(payload.sessionId());
     }
 
     @Override
@@ -117,6 +131,12 @@ public class EvaluateStreamConsumer extends AbstractStreamConsumer<EvaluateStrea
         }
 
         InterviewSessionEntity session = sessionOpt.get();
+        if (session.getStatus() == InterviewSessionEntity.SessionStatus.EVALUATED) {
+            // 重复消息：报告已生成，不重复调用 LLM、不覆盖已有结果
+            log.info("会话已完成评估，跳过重复评估: sessionId={}", sessionId);
+            return;
+        }
+
         List<InterviewQuestionDTO> questions = objectMapper.readValue(
             session.getQuestionsJson(),
             new TypeReference<>() {}
@@ -142,17 +162,24 @@ public class EvaluateStreamConsumer extends AbstractStreamConsumer<EvaluateStrea
 
     @Override
     protected void markCompleted(EvaluatePayload payload) {
-        updateEvaluateStatus(payload.sessionId(), AsyncTaskStatus.COMPLETED, null);
+        sessionService.completeEvaluation(payload.sessionId());
     }
 
     @Override
     protected void markFailed(EvaluatePayload payload, String error) {
-        updateEvaluateStatus(payload.sessionId(), AsyncTaskStatus.FAILED, error);
+        sessionService.failEvaluation(payload.sessionId(), error);
     }
 
     @Override
     protected void retryMessage(EvaluatePayload payload, int retryCount) {
         String sessionId = payload.sessionId();
+
+        // PROCESSING → PENDING 条件回退；失败说明任务已完成或状态被其它实例修改，不再重复入队
+        if (!sessionService.resetEvaluationForRetry(sessionId)) {
+            log.info("评估任务状态不可回退，放弃重试: sessionId={}, retryCount={}", sessionId, retryCount);
+            return;
+        }
+
         try {
             Map<String, String> message = Map.of(
                 AsyncTaskStreamConstants.FIELD_SESSION_ID, sessionId,
@@ -167,24 +194,8 @@ public class EvaluateStreamConsumer extends AbstractStreamConsumer<EvaluateStrea
             log.info("评估任务已重新入队: sessionId={}, retryCount={}", sessionId, retryCount);
 
         } catch (Exception e) {
-            log.error("重试入队失败: sessionId={}, error={}", sessionId, e.getMessage(), e);
-            updateEvaluateStatus(sessionId, AsyncTaskStatus.FAILED, truncateError("重试入队失败: " + e.getMessage()));
-        }
-    }
-
-    /**
-     * 更新评估状态
-     */
-    private void updateEvaluateStatus(String sessionId, AsyncTaskStatus status, String error) {
-        try {
-            sessionRepository.findBySessionId(sessionId).ifPresent(session -> {
-                session.setEvaluateStatus(status);
-                session.setEvaluateError(error);
-                sessionRepository.save(session);
-                log.debug("评估状态已更新: sessionId={}, status={}", sessionId, status);
-            });
-        } catch (Exception e) {
-            log.error("更新评估状态失败: sessionId={}, status={}, error={}", sessionId, status, e.getMessage(), e);
+            log.error("重试入队失败: sessionId={}, retryCount={}", sessionId, retryCount, e);
+            sessionService.failEvaluation(sessionId, truncateError("重试入队失败: " + e.getMessage()));
         }
     }
 

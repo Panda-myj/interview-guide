@@ -2,6 +2,7 @@ import {useCallback, useEffect, useState} from 'react';
 import {AnimatePresence, motion} from 'framer-motion';
 import {AnalyzeStatus, historyApi, ResumeListItem, ResumeStats} from '../api/history';
 import DeleteConfirmDialog from './DeleteConfirmDialog';
+import { useToast } from './Toast';
 import {getScoreColor} from '../utils/score';
 import {formatDate} from '../utils/date';
 import {
@@ -114,6 +115,7 @@ function StatCard({
 }
 
 export default function HistoryList({ onSelectResume }: HistoryListProps) {
+  const toast = useToast();
   const [resumes, setResumes] = useState<ResumeListItem[]>([]);
   const [stats, setStats] = useState<ResumeStats | null>(null);
   const [loading, setLoading] = useState(true);
@@ -176,15 +178,20 @@ export default function HistoryList({ onSelectResume }: HistoryListProps) {
   }, [resumes, loading, loadDataSilent]);
 
   // 下载简历
-  const handleDownload = (resume: ResumeListItem, e: React.MouseEvent) => {
+  const handleDownload = async (resume: ResumeListItem, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (resume.storageUrl) {
+    try {
+      const blob = await historyApi.downloadResumeFile(resume.id);
+      const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
-      link.href = resume.storageUrl;
+      link.href = url;
       link.download = resume.filename;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('下载简历失败', err);
     }
   };
 
@@ -216,7 +223,7 @@ export default function HistoryList({ onSelectResume }: HistoryListProps) {
       await loadResumes();
       setDeleteItem(null);
     } catch (err) {
-      alert(err instanceof Error ? err.message : '删除失败，请稍后重试');
+      toast.error(err instanceof Error ? err.message : '删除失败，请稍后重试');
     } finally {
       setDeletingId(null);
     }
@@ -397,15 +404,13 @@ export default function HistoryList({ onSelectResume }: HistoryListProps) {
                     <td className="px-6 py-4 text-right">
                       <div className="flex items-center justify-end gap-1">
                         {/* 下载按钮 */}
-                        {resume.storageUrl && (
-                          <button
-                            onClick={(e) => handleDownload(resume, e)}
-                            className="p-2 text-slate-400 hover:text-primary-500 hover:bg-primary-50 rounded-lg transition-colors"
-                            title="下载"
-                          >
-                            <Download className="w-4 h-4" />
-                          </button>
-                        )}
+                        <button
+                          onClick={(e) => handleDownload(resume, e)}
+                          className="p-2 text-slate-400 hover:text-primary-500 hover:bg-primary-50 rounded-lg transition-colors"
+                          title="下载"
+                        >
+                          <Download className="w-4 h-4" />
+                        </button>
                         {/* 重新分析按钮（仅 FAILED 状态显示） */}
                         {resume.analyzeStatus === 'FAILED' && (
                           <button

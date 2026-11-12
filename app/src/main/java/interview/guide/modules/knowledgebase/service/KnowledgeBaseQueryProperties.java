@@ -12,6 +12,8 @@ public class KnowledgeBaseQueryProperties {
     private Rewrite rewrite = new Rewrite();
     private Search search = new Search();
     private History history = new History();
+    private Context context = new Context();
+    private Retrieval retrieval = new Retrieval();
     private String systemPromptPath = "classpath:prompts/knowledgebase-query-system.st";
     private String userPromptPath = "classpath:prompts/knowledgebase-query-user.st";
     private String rewritePromptPath = "classpath:prompts/knowledgebase-query-rewrite.st";
@@ -38,5 +40,36 @@ public class KnowledgeBaseQueryProperties {
     public static class History {
         private boolean enabled = true;
         private int maxMessages = 10;
+    }
+
+    /**
+     * 注入上下文的上限控制：防止一次检索命中过多/过长的文档把提示词撑爆，
+     * 同时限制用户问题与历史消息长度，避免超长输入放大 token 费用。
+     */
+    @Data
+    public static class Context {
+        /** 最多注入多少段文档（按检索顺序截断）。 */
+        private int maxDocs = 6;
+        /** 单段文档最大字符数。 */
+        private int maxCharsPerDoc = 1200;
+        /** 所有文档合计最大字符数。 */
+        private int maxTotalChars = 6000;
+        /** 用户问题最大字符数，超出直接截断。 */
+        private int maxQuestionChars = 2000;
+        /** 单条历史消息最大字符数。 */
+        private int maxHistoryMessageChars = 800;
+    }
+
+    /**
+     * 检索与排序策略。默认 {@code vector} 与升级前完全一致，改回该值即完成回滚。
+     */
+    @Data
+    public static class Retrieval {
+        /** vector | hybrid | vector_rerank | hybrid_rerank，未知值按 vector 处理。 */
+        private String mode = "vector";
+        /** 候选池上限，用于给重排留空间的同时封住成本。 */
+        private int maxCandidates = 50;
+        /** 重排预算（毫秒）：向量检索已耗时超过该值则跳过重排，直接按向量顺序返回。 */
+        private long timeoutMs = 3000;
     }
 }

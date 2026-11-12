@@ -17,12 +17,14 @@ server:
 
 # SpringDoc OpenAPI / Swagger配置
 springdoc:
+  api-docs:
+    enabled: ${SPRINGDOC_API_DOCS_ENABLED:true}
+    path: /v3/api-docs
   swagger-ui:
+    enabled: ${SPRINGDOC_SWAGGER_UI_ENABLED:true}
     path: /swagger-ui.html
     tags-sorter: alpha
     operations-sorter: alpha
-  api-docs:
-    path: /v3/api-docs
   packages-to-scan: interview.guide.modules
 
 spring:
@@ -37,28 +39,43 @@ spring:
     virtual:
       enabled: true
 
+  # Jackson 序列化时区；无时区墙钟一律表示 Asia/Shanghai（见 common/config/AppClockConfig）
+  jackson:
+    time-zone: Asia/Shanghai
+
   # PostgreSQL数据库配置
   datasource:
     url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:interview_guide}
     username: ${POSTGRES_USER:postgres}
     # 与根目录 docker-compose.yml 中 postgres 服务默认一致（本地只起依赖容器 + bootRun 时无需改）
-    password: ${POSTGRES_PASSWORD:123456}
+    password: ${POSTGRES_PASSWORD:}
     driver-class-name: org.postgresql.Driver
 
   jpa:
     hibernate:
-      ddl-auto: update #首次启动用 create，表创建成功后，改回 update
+      ddl-auto: ${JPA_DDL_AUTO:validate}
     show-sql: false
     properties:
       hibernate:
         format_sql: true
+
+  flyway:
+    enabled: ${FLYWAY_ENABLED:true}
+    baseline-on-migrate: true
+    baseline-version: 1
+    validate-on-migrate: true
+    placeholders:
+      # V2 建立引导管理员并迁移存量数据；V9 仅在 mock 短信模式下把账号与数据归属
+      # 收敛到该手机号，真实短信通道（aliyun / pnvs）必须跳过，避免误删真实用户。
+      bootstrapPhone: ${APP_AUTH_BOOTSTRAP_PHONE:}
+      smsProvider: ${APP_AUTH_SMS_PROVIDER:mock}
 
   servlet:
     multipart:
       enabled: true
       max-file-size: 50MB  # 支持知识库上传（简历限制在业务层检查）
       max-request-size: 50MB
-  
+
 
   # Redisson配置 (使用 spring.redis.redisson，参考官方文档)
   redis:
@@ -89,6 +106,43 @@ spring:
 
 # Application custom configuration
 app:
+  auth:
+    jwt-secret: ${AUTH_JWT_SECRET:}
+    issuer: ${AUTH_JWT_ISSUER:ai-interview-platform}
+    audience: ${AUTH_JWT_AUDIENCE:ai-interview-web}
+    access-token-ttl: ${AUTH_ACCESS_TOKEN_TTL:15m}
+    refresh-token-ttl: ${AUTH_REFRESH_TOKEN_TTL:30d}
+    refresh-reuse-grace: ${AUTH_REFRESH_REUSE_GRACE:30s}
+    device-cookie-ttl: ${AUTH_DEVICE_COOKIE_TTL:180d}
+    ws-ticket-ttl: ${AUTH_WS_TICKET_TTL:60s}
+    bootstrap-phone: ${APP_AUTH_BOOTSTRAP_PHONE:}
+    secure-cookies: ${AUTH_SECURE_COOKIES:false}
+    sms:
+      provider: ${APP_AUTH_SMS_PROVIDER:mock}
+      expose-debug-code: ${APP_AUTH_EXPOSE_DEBUG_CODE:false}
+      code-ttl: ${AUTH_SMS_CODE_TTL:5m}
+      resend-cooldown: ${AUTH_SMS_RESEND_COOLDOWN:60s}
+      daily-limit: ${AUTH_SMS_DAILY_LIMIT:5}
+      max-attempts: ${AUTH_SMS_MAX_ATTEMPTS:5}
+      aliyun:
+        endpoint: ${ALIYUN_SMS_ENDPOINT:dysmsapi.aliyuncs.com}
+        access-key-id: ${ALIYUN_SMS_ACCESS_KEY_ID:}
+        access-key-secret: ${ALIYUN_SMS_ACCESS_KEY_SECRET:}
+        sign-name: ${ALIYUN_SMS_SIGN_NAME:}
+        login-code-template-code: ${ALIYUN_SMS_LOGIN_CODE_TEMPLATE:}
+        login-alert-template-code: ${ALIYUN_SMS_LOGIN_ALERT_TEMPLATE:}
+      pnvs:
+        endpoint: ${ALIYUN_PNVS_ENDPOINT:dypnsapi.aliyuncs.com}
+        access-key-id: ${ALIYUN_PNVS_ACCESS_KEY_ID:}
+        access-key-secret: ${ALIYUN_PNVS_ACCESS_KEY_SECRET:}
+        sign-name: ${ALIYUN_PNVS_SIGN_NAME:}
+        template-code: ${ALIYUN_PNVS_TEMPLATE_CODE:}
+        scheme-name: ${ALIYUN_PNVS_SCHEME_NAME:}
+        country-code: ${ALIYUN_PNVS_COUNTRY_CODE:86}
+        template-expiry-minutes: ${ALIYUN_PNVS_TEMPLATE_EXPIRY_MINUTES:5}
+        code-length: ${ALIYUN_PNVS_CODE_LENGTH:6}
+        valid-time-seconds: ${ALIYUN_PNVS_VALID_TIME_SECONDS:300}
+        interval-seconds: ${ALIYUN_PNVS_INTERVAL_SECONDS:60}
   ai:
     default-provider: dashscope
     default-embedding-provider: dashscope
@@ -97,10 +151,30 @@ app:
       api-key-encryption-key: ${APP_AI_CONFIG_ENCRYPTION_KEY:}
       require-encryption-key: ${APP_AI_CONFIG_REQUIRE_ENCRYPTION_KEY:true}
       allow-fallback-encryption-key: ${APP_AI_CONFIG_ALLOW_FALLBACK_ENCRYPTION_KEY:false}
-    # 运行时可写的 Provider 配置落点（与 classpath 主 application.yml 隔离）。
-    # 开发环境默认写到用户主目录下，避免污染源码目录或 jar 内 classpath 资源。
-    config-yaml-path: ${APP_AI_CONFIG_YAML_PATH:${user.home}/.interview-guide/llm-providers.yml}
-    config-env-path: ${APP_AI_CONFIG_ENV_PATH:${user.home}/.interview-guide/llm-providers.env}
+      # 是否允许 Provider / 语音服务访问本机与内网地址（防 SSRF）。
+      # 开发环境放开以支持 lmstudio（http://localhost:1234）；生产 profile 已强制 false。
+      allow-local-endpoints: ${APP_AI_ALLOW_LOCAL_ENDPOINTS:true}
+    # Provider HTTP 客户端超时。read-timeout 是“单次读取”超时，流式输出按分片计算，
+    # 不会因为整段回答耗时长而中断；max-retries 保持 0，重试统一由业务层分类后执行。
+    http:
+      connect-timeout: ${APP_AI_HTTP_CONNECT_TIMEOUT:10s}
+      read-timeout: ${APP_AI_HTTP_READ_TIMEOUT:180s}
+      max-retries: ${APP_AI_HTTP_MAX_RETRIES:0}
+    # 外部调用韧性：可重试错误退避重试 + 按调用场景熔断
+    resilience:
+      retry-enabled: ${APP_AI_RESILIENCE_RETRY_ENABLED:true}
+      backoff-initial: ${APP_AI_RESILIENCE_BACKOFF_INITIAL:300ms}
+      backoff-max: ${APP_AI_RESILIENCE_BACKOFF_MAX:2s}
+      circuit-breaker-enabled: ${APP_AI_RESILIENCE_CIRCUIT_BREAKER_ENABLED:true}
+      failure-threshold: ${APP_AI_RESILIENCE_FAILURE_THRESHOLD:5}
+      open-duration: ${APP_AI_RESILIENCE_OPEN_DURATION:30s}
+    # 运行期配置落点（与 classpath 主 application.yml 隔离）。
+    # 留空表示：只写数据库与进程内存，不生成任何本机文件（推荐，也是默认值）。
+    # 显式配置后才会写本机文件，且只写 ${ENV} 占位符、使用原子替换与 0600 权限；
+    # 禁止指向 src/main/resources、target/classes、build/resources 或 jar 内路径。
+    config-yaml-path: ${APP_AI_CONFIG_YAML_PATH:}
+    # 已废弃：应用不再读写 .env，API Key 不会以明文落盘。保留该键仅为兼容旧部署变量。
+    config-env-path: ${APP_AI_CONFIG_ENV_PATH:}
     agent-utils:
       skills-root: ${APP_AI_AGENT_UTILS_SKILLS_ROOT:classpath:skills}
     providers:
@@ -169,6 +243,21 @@ app:
         topk-long: ${APP_AI_RAG_TOPK_LONG:8}
         min-score-short: ${APP_AI_RAG_MIN_SCORE_SHORT:0.18}
         min-score-default: ${APP_AI_RAG_MIN_SCORE_DEFAULT:0.28}
+      # 注入上下文上限：控制文档数量/长度、问题与历史消息长度，防止提示词膨胀与费用放大
+      context:
+        max-docs: ${APP_AI_RAG_CONTEXT_MAX_DOCS:6}
+        max-chars-per-doc: ${APP_AI_RAG_CONTEXT_MAX_CHARS_PER_DOC:1200}
+        max-total-chars: ${APP_AI_RAG_CONTEXT_MAX_TOTAL_CHARS:6000}
+        max-question-chars: ${APP_AI_RAG_CONTEXT_MAX_QUESTION_CHARS:2000}
+        max-history-message-chars: ${APP_AI_RAG_CONTEXT_MAX_HISTORY_MESSAGE_CHARS:800}
+      # 检索与排序策略：默认 vector 与升级前行为完全一致，改回 vector 即完成回滚
+      retrieval:
+        # vector | hybrid | vector_rerank | hybrid_rerank；未知值按 vector 处理
+        mode: ${APP_AI_RAG_RETRIEVAL_MODE:vector}
+        # 候选池上限：放大召回给重排留空间，同时封住单次检索的候选数量与耗时
+        max-candidates: ${APP_AI_RAG_RETRIEVAL_MAX_CANDIDATES:50}
+        # 重排预算（毫秒）：向量检索本身已超预算则跳过重排，直接按向量顺序返回
+        timeout-ms: ${APP_AI_RAG_RETRIEVAL_TIMEOUT_MS:3000}
 
   interview:
     follow-up-count: ${APP_INTERVIEW_FOLLOW_UP_COUNT:1}

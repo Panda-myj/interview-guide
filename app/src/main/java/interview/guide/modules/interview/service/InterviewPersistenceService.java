@@ -13,18 +13,24 @@ import interview.guide.modules.interview.repository.InterviewAnswerRepository;
 import interview.guide.modules.interview.repository.InterviewSessionRepository;
 import interview.guide.modules.resume.model.ResumeEntity;
 import interview.guide.modules.resume.repository.ResumeRepository;
+import interview.guide.modules.auth.security.CurrentUserService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.core.JacksonException;
 import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.ObjectMapper;
 
+import java.time.Clock;
 import java.time.LocalDateTime;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 /**
  * 面试持久化服务
@@ -39,6 +45,8 @@ public class InterviewPersistenceService {
     private final InterviewAnswerRepository answerRepository;
     private final ResumeRepository resumeRepository;
     private final ObjectMapper objectMapper;
+    private final CurrentUserService currentUserService;
+    private final Clock clock;
     
     /**
      * 保存新的面试会话（支持可选简历）
@@ -52,6 +60,7 @@ public class InterviewPersistenceService {
                                               String difficulty) {
         try {
             InterviewSessionEntity session = new InterviewSessionEntity();
+            session.setOwnerUser(currentUserService.getRequiredUser());
             session.setSessionId(sessionId);
             session.setTotalQuestions(totalQuestions);
             session.setCurrentQuestionIndex(0);
@@ -61,10 +70,12 @@ public class InterviewPersistenceService {
             session.setSkillId(skillId != null ? skillId : InterviewDefaults.SKILL_ID);
             session.setDifficulty(difficulty != null ? difficulty : InterviewDefaults.DIFFICULTY);
 
-            // 简历可选：有 resumeId 则关联简历
+            // 简历可选：有 resumeId 则关联简历，且必须属于当前用户
             if (resumeId != null) {
-                Optional<ResumeEntity> resumeOpt = resumeRepository.findById(resumeId);
-                resumeOpt.ifPresent(session::setResume);
+                ResumeEntity resume = resumeRepository
+                    .findByIdAndOwnerUserId(resumeId, currentUserService.getRequiredUserId())
+                    .orElseThrow(() -> new BusinessException(ErrorCode.RESUME_NOT_FOUND));
+                session.setResume(resume);
             }
 
             InterviewSessionEntity saved = sessionRepository.save(session);
@@ -88,7 +99,7 @@ public class InterviewPersistenceService {
             session.setStatus(status);
             if (status == InterviewSessionEntity.SessionStatus.COMPLETED ||
                 status == InterviewSessionEntity.SessionStatus.EVALUATED) {
-                session.setCompletedAt(LocalDateTime.now());
+                session.setCompletedAt(LocalDateTime.now(clock));
             }
             sessionRepository.save(session);
         }
@@ -169,7 +180,9 @@ public class InterviewPersistenceService {
         try {
             Optional<InterviewSessionEntity> sessionOpt = sessionRepository.findBySessionId(sessionId);
             if (sessionOpt.isEmpty()) {
-                log.warn("会话不存在: {}", sessionId);
+                // 会话已被删除：异步任务按丢弃规则 ACK，不再写入报告
+                log.warn("action=DROP_REPORT resourceType=INTERVIEW_SESSION resourceId={} "
+                    + "outcome=ENTITY_DELETED", sessionId);
                 return;
             }
 
@@ -180,7 +193,7 @@ public class InterviewPersistenceService {
             session.setImprovementsJson(objectMapper.writeValueAsString(report.improvements()));
             session.setReferenceAnswersJson(objectMapper.writeValueAsString(report.referenceAnswers()));
             session.setStatus(InterviewSessionEntity.SessionStatus.EVALUATED);
-            session.setCompletedAt(LocalDateTime.now());
+            session.setCompletedAt(LocalDateTime.now(clock));
 
             sessionRepository.save(session);
 
@@ -239,7 +252,11 @@ public class InterviewPersistenceService {
                 sessionId, report.overallScore(), answersToSave.size());
 
         } catch (JacksonException e) {
-            log.error("序列化报告失败: {}", e.getMessage(), e);
+            // 报告序列化失败必须向上抛出：吞掉异常会让评估任务被误判为成功，
+            // 会话停留在无报告的 EVALUATED 状态，只能靠人工重放修复
+            log.error("序列化面试报告失败: sessionId={}", sessionId, e);
+            throw new BusinessException(
+                ErrorCode.INTERVIEW_REPORT_SAVE_FAILED, "保存面试报告失败，请稍后重试", e);
         }
     }
     
@@ -247,21 +264,45 @@ public class InterviewPersistenceService {
      * 根据会话ID获取会话
      */
     public Optional<InterviewSessionEntity> findBySessionId(String sessionId) {
-        return sessionRepository.findBySessionId(sessionId);
+        return sessionRepository.findBySessionIdAndOwnerUserId(
+            sessionId, currentUserService.getRequiredUserId()
+        );
     }
     
     /**
      * 获取简历的所有面试记录
      */
     public List<InterviewSessionEntity> findByResumeId(Long resumeId) {
-        return sessionRepository.findByResumeIdOrderByCreatedAtDesc(resumeId);
+        return sessionRepository.findByResumeIdAndOwnerUserIdOrderByCreatedAtDesc(
+            resumeId, currentUserService.getRequiredUserId()
+        );
     }
 
     /**
      * 获取所有面试记录（按创建时间倒序）
      */
     public List<InterviewSessionEntity> findAll() {
-        return sessionRepository.findAllByOrderByCreatedAtDesc();
+        return sessionRepository.findAllByOwnerUserIdOrderByCreatedAtDesc(currentUserService.getRequiredUserId());
+    }
+
+    /**
+     * 分页获取当前用户的面试会话（列表接口用，PERF-002）。
+     */
+    public Page<InterviewSessionEntity> findAll(Pageable pageable) {
+        return sessionRepository.findAllByOwnerUserIdOrderByCreatedAtDesc(
+            currentUserService.getRequiredUserId(), pageable);
+    }
+
+    /**
+     * 批量统计各简历的面试次数（单条 GROUP BY，替代逐简历 count，PERF-002）。
+     */
+    public Map<Long, Long> countSessionsByResumeIds(List<Long> resumeIds) {
+        if (resumeIds == null || resumeIds.isEmpty()) {
+            return Map.of();
+        }
+        return sessionRepository.countByResumeIdsAndOwnerUserId(
+                resumeIds, currentUserService.getRequiredUserId()).stream()
+            .collect(Collectors.toMap(row -> (Long) row[0], row -> (Long) row[1]));
     }
     
     /**
@@ -271,7 +312,9 @@ public class InterviewPersistenceService {
      */
     @Transactional(rollbackFor = Exception.class)
     public void deleteSessionsByResumeId(Long resumeId) {
-        List<InterviewSessionEntity> sessions = sessionRepository.findByResumeIdOrderByCreatedAtDesc(resumeId);
+        List<InterviewSessionEntity> sessions = sessionRepository.findByResumeIdAndOwnerUserIdOrderByCreatedAtDesc(
+            resumeId, currentUserService.getRequiredUserId()
+        );
         if (!sessions.isEmpty()) {
             sessionRepository.deleteAll(sessions);
             log.info("已删除 {} 个面试会话（包含所有答案）", sessions.size());
@@ -285,7 +328,9 @@ public class InterviewPersistenceService {
      */
     @Transactional(rollbackFor = Exception.class)
     public void deleteSessionBySessionId(String sessionId) {
-        Optional<InterviewSessionEntity> sessionOpt = sessionRepository.findBySessionId(sessionId);
+        Optional<InterviewSessionEntity> sessionOpt = sessionRepository.findBySessionIdAndOwnerUserId(
+            sessionId, currentUserService.getRequiredUserId()
+        );
         if (sessionOpt.isPresent()) {
             sessionRepository.delete(sessionOpt.get());
             log.info("已删除面试会话: sessionId={}", sessionId);
@@ -302,7 +347,9 @@ public class InterviewPersistenceService {
             InterviewSessionEntity.SessionStatus.CREATED,
             InterviewSessionEntity.SessionStatus.IN_PROGRESS
         );
-        return sessionRepository.findFirstByResumeIdAndStatusInOrderByCreatedAtDesc(resumeId, unfinishedStatuses);
+        return sessionRepository.findFirstByResumeIdAndOwnerUserIdAndStatusInOrderByCreatedAtDesc(
+            resumeId, currentUserService.getRequiredUserId(), unfinishedStatuses
+        );
     }
     
     /**
@@ -319,11 +366,15 @@ public class InterviewPersistenceService {
      * 有 resumeId 时精确匹配 resumeId + skillId；无 resumeId 时按 skillId 查全部（通用模式兜底）。
      */
     public List<HistoricalQuestion> getHistoricalQuestions(String skillId, Long resumeId) {
+        Long ownerUserId = currentUserService.getRequiredUserId();
         List<InterviewSessionEntity> sessions;
         if (resumeId != null) {
-            sessions = sessionRepository.findTop10ByResumeIdAndSkillIdOrderByCreatedAtDesc(resumeId, skillId);
+            sessions = sessionRepository
+                .findTop10ByResumeIdAndOwnerUserIdAndSkillIdOrderByCreatedAtDesc(
+                    resumeId, ownerUserId, skillId);
         } else {
-            sessions = sessionRepository.findTop10BySkillIdOrderByCreatedAtDesc(skillId);
+            sessions = sessionRepository
+                .findTop10ByOwnerUserIdAndSkillIdOrderByCreatedAtDesc(ownerUserId, skillId);
         }
 
         log.info("加载历史题目: skillId={}, resumeId={}, 查到 {} 个历史会话", skillId, resumeId, sessions.size());

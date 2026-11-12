@@ -2,6 +2,7 @@ package interview.guide.modules.llmprovider.service;
 
 import interview.guide.common.ai.ApiPathResolver;
 import interview.guide.common.ai.LlmProviderRegistry;
+import interview.guide.common.ai.ProviderEndpointValidator;
 import interview.guide.common.config.LlmProviderProperties;
 import interview.guide.common.config.LlmProviderProperties.ProviderConfig;
 import interview.guide.common.exception.BusinessException;
@@ -26,6 +27,7 @@ import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.http.client.ClientHttpRequestFactoryBuilder;
 import org.springframework.boot.http.client.HttpClientSettings;
+import org.springframework.boot.http.client.HttpRedirects;
 import org.springframework.boot.http.client.InetAddressFilter;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -35,27 +37,76 @@ import org.springframework.web.client.RestClientResponseException;
 
 import java.io.IOException;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.net.URI;
-import java.time.Duration;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+/**
+ * Provider 与语音服务配置的读写入口。
+ *
+ * <p><b>敏感信息落盘策略</b></p>
+ * <ul>
+ *   <li>Provider API Key 只以 AES-GCM 密文保存在数据库（{@code llm_provider.api_key_*}），是本服务的唯一主路径。</li>
+ *   <li>默认不写 {@code .env}，也不生成任何含明文密钥的文件；本类没有写 ENV 的代码路径。</li>
+ *   <li>ASR/TTS 的 API Key 只在当前进程内存中生效，重启后需通过 {@code AI_BAILIAN_API_KEY} 环境变量提供。</li>
+ *   <li>仅在显式配置 {@code app.ai.config-yaml-path} 时，才会把非敏感字段写入受限目录下的本机文件：
+ *       原子替换、POSIX 0600、目录 0700、跨进程 {@link FileChannel} 文件锁，且只写 {@code ${ENV}} 占位符。</li>
+ * </ul>
+ *
+ * <p><b>多实例热加载边界</b></p>
+ * <ul>
+ *   <li>{@code registry.reload()} 只清空当前 JVM 的 ChatClient/ChatModel 缓存，不广播。</li>
+ *   <li>其他实例会继续持有旧客户端（旧 baseUrl、旧密钥），直到重启或调用
+ *       {@code POST /api/llm-providers/reload} 手动刷新；数据库始终是唯一真相。</li>
+ *   <li>刷新只影响“下一次取用”，不做连通性校验；新配置不可用会在下次调用时抛
+ *       {@code PROVIDER_CONFIG_READ_FAILED}，需回滚配置或修正密钥。</li>
+ *   <li>刷新失败不会回滚已提交的数据库写入，只记录 WARN，避免热加载故障放大成写入故障。</li>
+ * </ul>
+ *
+ * <p><b>加密密钥轮换</b></p>
+ * <ul>
+ *   <li>{@code APP_AI_CONFIG_ENCRYPTION_KEY} 变更后旧密文无法解密，且没有自动迁移。</li>
+ *   <li>轮换顺序：准备新密钥 → 用新密钥启动一个实例并通过更新接口重新录入所有 Provider API Key
+ *       （密文用新密钥重写）→ 全量实例切换到新密钥 → 回调 {@code /reload} → 校验连通性。</li>
+ *   <li>同一时刻只允许一套加密密钥生效，不支持多密钥并行解密。</li>
+ * </ul>
+ */
 @Service
 @Slf4j
 public class LlmProviderConfigService {
+
+  private static final Pattern PLAINTEXT_API_KEY_LINE =
+      Pattern.compile("^(\\s*api-key:\\s*)(\\S.*)$");
+  private static final String DEFAULT_PROVIDER_ENV_KEY = "APP_AI_PROVIDER_API_KEY";
+  private static final String BAILIAN_ENV_KEY = "AI_BAILIAN_API_KEY";
+  private static final int PROVIDER_CONNECT_TIMEOUT_SECONDS = 5;
+  private static final int PROVIDER_READ_TIMEOUT_SECONDS = 10;
+  private static final int ASR_CONNECT_TIMEOUT_MS = 5000;
 
   private final LlmProviderProperties properties;
   private final LlmProviderRegistry registry;
@@ -63,8 +114,8 @@ public class LlmProviderConfigService {
   private final LlmGlobalSettingRepository globalSettingRepository;
   private final ApiKeyEncryptionService encryptionService;
   private final String yamlPath;
-  private final String envPath;
   private final ReentrantReadWriteLock rwLock = new ReentrantReadWriteLock();
+  private final AtomicBoolean posixPermissionWarningLogged = new AtomicBoolean();
   private final VoiceInterviewProperties voiceProperties;
   private final QwenAsrService asrService;
   private final QwenTtsService ttsService;
@@ -93,7 +144,6 @@ public class LlmProviderConfigService {
     this.globalSettingRepository = globalSettingRepository;
     this.encryptionService = encryptionService;
     this.yamlPath = properties.getConfigYamlPath();
-    this.envPath = properties.getConfigEnvPath();
     this.voiceProperties = voiceProperties;
     this.asrService = asrService;
     this.ttsService = ttsService;
@@ -110,30 +160,22 @@ public class LlmProviderConfigService {
 
   @PostConstruct
   void validateWritablePaths() {
-    ensureParentWritable(yamlPath, "config-yaml-path");
-    ensureParentWritable(envPath, "config-env-path");
+    if (isRuntimeConfigPathConfigured()) {
+      Path path = requireRuntimeConfigPath();
+      ensurePrivateDirectory(path.getParent());
+      if (!Files.isWritable(path.getParent())) {
+        throw new BusinessException(ErrorCode.PROVIDER_CONFIG_WRITE_FAILED,
+            "Provider 配置目录不可写: " + path.getParent());
+      }
+      sanitizeLegacyPlaintextSecrets(path);
+      log.info("运行期配置文件解析为 {}（仅本机用户可读写，写入使用原子替换）", path);
+      return;
+    }
+    log.info("未配置 app.ai.config-yaml-path：Provider/语音配置只写数据库与进程内存，不写任何本机文件");
   }
 
-  private void ensureParentWritable(String rawPath, String label) {
-    if (rawPath == null || rawPath.isBlank()) {
-      log.warn("{} is not configured; runtime Provider edits will be skipped", label);
-      return;
-    }
-    Path parent = Path.of(rawPath).toAbsolutePath().getParent();
-    if (parent == null) {
-      return;
-    }
-    try {
-      Files.createDirectories(parent);
-    } catch (IOException e) {
-      throw new BusinessException(ErrorCode.PROVIDER_CONFIG_WRITE_FAILED,
-          label + " 的父目录不可创建: " + parent, e);
-    }
-    if (!Files.isWritable(parent)) {
-      throw new BusinessException(ErrorCode.PROVIDER_CONFIG_WRITE_FAILED,
-          label + " 的父目录不可写: " + parent);
-    }
-    log.info("{} resolved to {} (parent writable)", label, rawPath);
+  private boolean isRuntimeConfigPathConfigured() {
+    return yamlPath != null && !yamlPath.isBlank();
   }
 
   // ===== Read operations (read lock) =====
@@ -295,20 +337,32 @@ public class LlmProviderConfigService {
     rwLock.readLock().lock();
     try {
       VoiceInterviewProperties.AsrConfig asr = voiceProperties.getQwen().getAsr();
+      String url = asr.getUrl();
       try {
-        java.net.URI wsUri = java.net.URI.create(asr.getUrl());
+        URI wsUri = ProviderEndpointValidator.requireWebSocketEndpoint(url, allowLocalEndpoints());
         String host = wsUri.getHost();
-        int port = wsUri.getPort() > 0 ? wsUri.getPort() : (wsUri.getScheme().equals("wss") ? 443 : 80);
-        java.net.InetSocketAddress address = new java.net.InetSocketAddress(host, port);
-        java.net.Socket socket = new java.net.Socket();
-        socket.connect(address, 5000);
-        socket.close();
+        int port = wsUri.getPort() > 0
+            ? wsUri.getPort()
+            : ("wss".equalsIgnoreCase(wsUri.getScheme()) ? 443 : 80);
+        InetAddress address = ProviderEndpointValidator.resolveAllowedAddress(host, allowLocalEndpoints());
+        try (Socket socket = new Socket()) {
+          // 直接连接已校验的 IP，避免二次 DNS 解析被重绑定绕过
+          socket.connect(new InetSocketAddress(address, port), ASR_CONNECT_TIMEOUT_MS);
+        }
         return ProviderTestResult.builder()
             .success(true)
             .message("ASR WebSocket 连接成功: " + host)
             .model(asr.getModel())
             .build();
-      } catch (Exception e) {
+      } catch (BusinessException e) {
+        log.warn("ASR 地址未通过安全检查: url={}, reason={}", url, e.getMessage());
+        return ProviderTestResult.builder()
+            .success(false)
+            .message("ASR 连接被拒绝: " + e.getMessage())
+            .model(asr.getModel())
+            .build();
+      } catch (IOException e) {
+        log.warn("ASR 连接失败: url={}, reason={}", url, e.getMessage());
         return ProviderTestResult.builder()
             .success(false)
             .message("ASR 连接失败: " + e.getMessage())
@@ -372,7 +426,7 @@ public class LlmProviderConfigService {
           .builtin(false)
           .build());
       // ===== 分支 6：刷新内存注册表 =====
-      registry.reload(); //(registry.reload() 不在事务内
+      refreshRegistry("createProvider"); //(registry.reload() 不在事务内
 //        为什么这行放在事务外面？ 因为 registry.reload() 可能涉及网络调用或者类加载，跟数据库事务无关。
 //        项目规则明确规定："事务内不得调用 LLM、S3、外部 HTTP"。如果 reload() 失败抛异常，数据库的写入也不应该回滚——数据已经正确落库了，registry 刷新失败是另一个独立问题。
       log.info("Created provider: id={}, baseUrl={}, model={}", providerId, baseUrl, model);
@@ -431,7 +485,7 @@ public class LlmProviderConfigService {
       }
 
       providerRepository.save(provider);
-      registry.reload();
+      refreshRegistry("updateProvider");
       log.info("Updated provider: id={}", id);
     } finally {
       rwLock.writeLock().unlock();
@@ -454,7 +508,7 @@ public class LlmProviderConfigService {
       getProviderEntityOrThrow(id);
 
       providerRepository.deleteById(id);
-      registry.reload();
+      refreshRegistry("deleteProvider");
       log.info("Deleted provider: id={}", id);
     } finally {
       rwLock.writeLock().unlock();
@@ -477,7 +531,7 @@ public class LlmProviderConfigService {
       LlmGlobalSettingEntity setting = getGlobalSettingOrThrow();
       setting.setDefaultChatProviderId(providerId);
       globalSettingRepository.save(setting);
-      registry.reload();
+      refreshRegistry("updateDefaultProvider");
       log.info("Updated default provider: {}", providerId);
     } finally {
       rwLock.writeLock().unlock();
@@ -506,7 +560,7 @@ public class LlmProviderConfigService {
       LlmGlobalSettingEntity setting = getGlobalSettingOrThrow();
       setting.setDefaultEmbeddingProviderId(providerId);
       globalSettingRepository.save(setting);
-      registry.reload();
+      refreshRegistry("updateDefaultEmbeddingProvider");
       log.info("Updated default embedding provider: {}", providerId);
     } finally {
       rwLock.writeLock().unlock();
@@ -530,7 +584,7 @@ public class LlmProviderConfigService {
       if (request.apiKey() != null) {
         asr.setApiKey(request.apiKey());
         tts.setApiKey(request.apiKey());
-        updateEnvValue("AI_BAILIAN_API_KEY", request.apiKey());
+        warnApiKeyNotPersisted("ASR/TTS", request.apiKey());
       }
 
       writeAsrConfigToYaml(asr);
@@ -560,7 +614,7 @@ public class LlmProviderConfigService {
       if (request.apiKey() != null) {
         tts.setApiKey(request.apiKey());
         asr.setApiKey(request.apiKey());
-        updateEnvValue("AI_BAILIAN_API_KEY", request.apiKey());
+        warnApiKeyNotPersisted("TTS/ASR", request.apiKey());
       }
 
       writeTtsConfigToYaml(tts);
@@ -622,8 +676,8 @@ public class LlmProviderConfigService {
 
     String envKey = toEnvKey(request.id());
     writeProviderToYaml(request.id(), config, envKey);
-    writeEnvValue(envKey, request.apiKey());
-    registry.reload();
+    warnApiKeyNotPersisted(envKey, request.apiKey());
+    refreshRegistry("createProviderLegacy");
   }
 
   private void updateProviderLegacy(String id, UpdateProviderRequest request) {
@@ -657,11 +711,11 @@ public class LlmProviderConfigService {
     }
     if (trimmedApiKey != null) {
       config.setApiKey(trimmedApiKey);
-      updateEnvValue(toEnvKey(id), trimmedApiKey);
+      warnApiKeyNotPersisted(toEnvKey(id), trimmedApiKey);
     }
 
     writeProviderToYaml(id, config, toEnvKey(id));
-    registry.reload();
+    refreshRegistry("updateProviderLegacy");
   }
 
   private void deleteProviderLegacy(String id) {
@@ -673,8 +727,8 @@ public class LlmProviderConfigService {
     getLegacyProvidersOrThrow().remove(id);
     String envKey = toEnvKey(id);
     removeProviderFromYaml(id);
-    removeFromEnv(envKey);
-    registry.reload();
+    log.info("Provider '{}' 已从本机配置移除；如需清理本机密钥，请手动删除 .env 中的 {}", id, envKey);
+    refreshRegistry("deleteProviderLegacy");
   }
 
   private void updateDefaultProviderLegacy(DefaultProviderDTO request) {
@@ -685,7 +739,7 @@ public class LlmProviderConfigService {
     getLegacyProviderConfigOrThrow(providerId);
     properties.setDefaultProvider(providerId);
     writeDefaultProviderToYaml(providerId);
-    registry.reload();
+    refreshRegistry("updateDefaultProviderLegacy");
   }
 
   private ProviderRuntimeConfig toRuntimeConfig(ProviderConfig config) {
@@ -830,20 +884,29 @@ public class LlmProviderConfigService {
   }
 
   private String toEnvKey(String providerId) {
-    return "PROVIDER_" + providerId.toUpperCase().replace("-", "_") + "_API_KEY";
+    return "PROVIDER_" + providerId.toUpperCase(Locale.ROOT).replace("-", "_") + "_API_KEY";
   }
 
   // ===== Provider test logic (called under read lock) =====
 
   private ProviderTestResult doTestProvider(ProviderRuntimeConfig config, String id) {
+    Optional<ProviderTestResult> rejected = rejectUnsafeEndpoint(config, id);
+    if (rejected.isPresent()) {
+      return rejected.get();
+    }
     try {
+      boolean allowLocal = allowLocalEndpoints();
+      InetAddressFilter addressFilter = InetAddressFilter.externalAddresses();
+      if (allowLocal) {
+        addressFilter = addressFilter
+            .or(InetAddressFilter.adapt(InetAddress::isLoopbackAddress))
+            .or("198.18.0.0/15");
+      }
       HttpClientSettings settings = HttpClientSettings.defaults()
-          .withConnectTimeout(Duration.ofSeconds(5))
-          .withReadTimeout(Duration.ofSeconds(10))
-          .withInetAddressFilter(
-              InetAddressFilter.externalAddresses()
-                  .or(InetAddressFilter.adapt(InetAddress::isLoopbackAddress))
-                  .or("198.18.0.0/15"));
+          .withConnectTimeout(Duration.ofSeconds(PROVIDER_CONNECT_TIMEOUT_SECONDS))
+          .withReadTimeout(Duration.ofSeconds(PROVIDER_READ_TIMEOUT_SECONDS))
+          .withRedirects(HttpRedirects.DONT_FOLLOW)
+          .withInetAddressFilter(addressFilter);
 
       RestClient restClient = RestClient.builder()
           .defaultHeader("Authorization", "Bearer " + config.apiKey())
@@ -921,10 +984,30 @@ public class LlmProviderConfigService {
     }
   }
 
+  private Optional<ProviderTestResult> rejectUnsafeEndpoint(ProviderRuntimeConfig config, String id) {
+    try {
+      ProviderEndpointValidator.requireHttpEndpoint(config.baseUrl(), allowLocalEndpoints());
+      return Optional.empty();
+    } catch (BusinessException e) {
+      log.warn("Provider 地址未通过安全检查，已拒绝连接: providerId={}, baseUrl={}, reason={}",
+          id, config.baseUrl(), e.getMessage());
+      return Optional.of(ProviderTestResult.builder()
+          .success(false)
+          .message("连接被拒绝: " + e.getMessage())
+          .model(config.model())
+          .build());
+    }
+  }
+
+  private boolean allowLocalEndpoints() {
+    LlmProviderProperties.SecurityConfig security = properties.getSecurity();
+    return security != null && security.isAllowLocalEndpoints();
+  }
+
   // ===== YAML text editing (preserves comments & formatting) =====
 
   private void writeProviderToYaml(String id, ProviderConfig config, String envKey) {
-    mutateYamlText(ErrorCode.PROVIDER_CONFIG_WRITE_FAILED, "写入 YAML 配置失败", editor -> {
+    mutateRuntimeConfig(ErrorCode.PROVIDER_CONFIG_WRITE_FAILED, "写入 YAML 配置失败", true, editor -> {
       LinkedHashMap<String, Object> values = new LinkedHashMap<>();
       values.put("base-url", config.getBaseUrl());
       values.put("api-key", "${" + envKey + "}");
@@ -943,24 +1026,24 @@ public class LlmProviderConfigService {
   }
 
   private void removeProviderFromYaml(String id) {
-    mutateYamlText(ErrorCode.PROVIDER_CONFIG_WRITE_FAILED, "删除 YAML 配置失败", editor -> {
+    mutateRuntimeConfig(ErrorCode.PROVIDER_CONFIG_WRITE_FAILED, "删除 YAML 配置失败", true, editor -> {
       editor.removeSection(new String[]{"app", "ai", "providers"}, id);
     });
   }
 
   private void writeDefaultProviderToYaml(String defaultProvider) {
-    mutateYamlText(ErrorCode.PROVIDER_CONFIG_WRITE_FAILED, "写入默认 Provider 配置失败", editor -> {
+    mutateRuntimeConfig(ErrorCode.PROVIDER_CONFIG_WRITE_FAILED, "写入默认 Provider 配置失败", true, editor -> {
       editor.setScalar(new String[]{"app", "ai", "default-provider"}, defaultProvider);
       editor.removeSection(new String[]{"app", "ai"}, "module-defaults");
     });
   }
 
   private void writeAsrConfigToYaml(VoiceInterviewProperties.AsrConfig asr) {
-    mutateYamlText(ErrorCode.VOICE_CONFIG_WRITE_FAILED, "写入 ASR 配置失败", editor -> {
+    mutateRuntimeConfig(ErrorCode.VOICE_CONFIG_WRITE_FAILED, "写入 ASR 配置失败", false, editor -> {
       LinkedHashMap<String, Object> values = new LinkedHashMap<>();
       values.put("url", asr.getUrl());
       values.put("model", asr.getModel());
-      values.put("api-key", "${AI_BAILIAN_API_KEY}");
+      values.put("api-key", "${" + BAILIAN_ENV_KEY + "}");
       values.put("language", asr.getLanguage());
       values.put("format", asr.getFormat());
       values.put("sample-rate", asr.getSampleRate());
@@ -973,10 +1056,10 @@ public class LlmProviderConfigService {
   }
 
   private void writeTtsConfigToYaml(VoiceInterviewProperties.QwenTtsConfig tts) {
-    mutateYamlText(ErrorCode.VOICE_CONFIG_WRITE_FAILED, "写入 TTS 配置失败", editor -> {
+    mutateRuntimeConfig(ErrorCode.VOICE_CONFIG_WRITE_FAILED, "写入 TTS 配置失败", false, editor -> {
       LinkedHashMap<String, Object> values = new LinkedHashMap<>();
       values.put("model", tts.getModel());
-      values.put("api-key", "${AI_BAILIAN_API_KEY}");
+      values.put("api-key", "${" + BAILIAN_ENV_KEY + "}");
       values.put("voice", tts.getVoice());
       values.put("format", tts.getFormat());
       values.put("sample-rate", tts.getSampleRate());
@@ -988,74 +1071,262 @@ public class LlmProviderConfigService {
     });
   }
 
-  private void mutateYamlText(ErrorCode errorCode, String errorMessage, Consumer<YamlTextEditor> mutator) {
-    if (yamlPath == null || yamlPath.isBlank()) {
-      log.warn("YAML path not configured, skip writing");
+  /**
+   * 读取-修改-写入本机运行期配置。
+   *
+   * <p>并发安全分两层：进程内由 {@link #rwLock} 写锁串行化（同时避免同一 JVM 内
+   * {@link java.nio.channels.OverlappingFileLockException}），跨进程 / 跨实例由文件锁串行化，
+   * 并且文件内容在持锁后才读取，避免并发写入互相覆盖。</p>
+   *
+   * @param required true 表示该配置只有本机文件一种持久化方式，未配置路径时必须显式失败
+   */
+  private void mutateRuntimeConfig(
+      ErrorCode errorCode,
+      String errorMessage,
+      boolean required,
+      Consumer<YamlTextEditor> mutator) {
+    if (!isRuntimeConfigPathConfigured()) {
+      if (required) {
+        throw new BusinessException(ErrorCode.PROVIDER_CONFIG_WRITE_FAILED,
+            "未配置 app.ai.config-yaml-path，无法持久化 Provider 配置；请改用数据库主路径");
+      }
+      log.warn("{} 未写入本机文件：未配置 app.ai.config-yaml-path，仅对当前进程生效", errorMessage);
       return;
     }
-    try {
-      Path path = Path.of(yamlPath);
-      List<String> lines;
-      if (Files.exists(path)) {
-        lines = new ArrayList<>(Files.readAllLines(path, StandardCharsets.UTF_8));
-      } else {
-        lines = new ArrayList<>();
-      }
-
+    Path path = requireRuntimeConfigPath();
+    Path directory = path.getParent();
+    ensurePrivateDirectory(directory);
+    Path lockFile = directory.resolve(path.getFileName() + ".lock");
+    try (FileChannel channel = FileChannel.open(lockFile,
+        StandardOpenOption.CREATE, StandardOpenOption.WRITE)) {
+      channel.lock();
+      List<String> lines = Files.exists(path)
+          ? new ArrayList<>(Files.readAllLines(path, StandardCharsets.UTF_8))
+          : new ArrayList<>();
       YamlTextEditor editor = new YamlTextEditor(lines);
       mutator.accept(editor);
-
       String content = String.join("\n", editor.getLines());
       if (!content.endsWith("\n")) {
         content += "\n";
       }
-      Files.writeString(path, content, StandardCharsets.UTF_8);
+      atomicWritePrivateFile(path, content);
     } catch (IOException e) {
-      throw new BusinessException(errorCode, errorMessage + ": " + e.getMessage());
+      throw new BusinessException(errorCode, errorMessage + ": " + e.getMessage(), e);
     }
   }
 
-  // ===== .env file operations =====
-
-  private void writeEnvValue(String key, String value) {
-    if (envPath == null || envPath.isBlank()) return;
+  private Path requireRuntimeConfigPath() {
+    Path path;
     try {
-      Path path = Path.of(envPath);
-      if (!Files.exists(path)) {
-        Files.writeString(path, key + "=" + value + "\n", StandardCharsets.UTF_8,
-            StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+      path = Path.of(yamlPath).toAbsolutePath().normalize();
+    } catch (InvalidPathException e) {
+      throw new BusinessException(ErrorCode.PROVIDER_CONFIG_WRITE_FAILED,
+          "app.ai.config-yaml-path 不是合法路径: " + yamlPath, e);
+    }
+    if (Files.isDirectory(path)) {
+      throw new BusinessException(ErrorCode.PROVIDER_CONFIG_WRITE_FAILED,
+          "app.ai.config-yaml-path 必须指向文件而不是目录: " + path);
+    }
+    String normalized = path.toString().replace('\\', '/').toLowerCase(Locale.ROOT);
+    if (normalized.contains("/src/main/resources/")
+        || normalized.contains("/target/classes/")
+        || normalized.contains("/build/resources/")
+        || normalized.contains(".jar!")) {
+      throw new BusinessException(ErrorCode.PROVIDER_CONFIG_WRITE_FAILED,
+          "禁止把运行期配置写回 classpath 或源码目录: " + path);
+    }
+    return path;
+  }
+
+  private void ensurePrivateDirectory(Path directory) {
+    if (directory == null) {
+      throw new BusinessException(ErrorCode.PROVIDER_CONFIG_WRITE_FAILED,
+          "app.ai.config-yaml-path 缺少父目录");
+    }
+    boolean existed = Files.exists(directory);
+    try {
+      Files.createDirectories(directory);
+    } catch (IOException e) {
+      throw new BusinessException(ErrorCode.PROVIDER_CONFIG_WRITE_FAILED,
+          "创建配置目录失败: " + directory, e);
+    }
+    if (existed) {
+      return;
+    }
+    try {
+      Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwx------"));
+    } catch (UnsupportedOperationException e) {
+      warnPosixPermissionUnsupported("把配置目录收紧为 0700", directory);
+    } catch (IOException e) {
+      log.warn("收紧配置目录权限失败，请手动确认目录仅本机用户可读写: {}", directory, e);
+    }
+  }
+
+  /**
+   * 临时文件 + 原子替换，写入后校验权限，失败时不破坏原文件。
+   */
+  private void atomicWritePrivateFile(Path path, String content) throws IOException {
+    Path directory = path.getParent();
+    Path tempFile = Files.createTempFile(directory, ".runtime-config", ".tmp");
+    try {
+      Files.writeString(tempFile, content, StandardCharsets.UTF_8,
+          StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING);
+      restrictToOwner(tempFile);
+      try {
+        Files.move(tempFile, path, StandardCopyOption.REPLACE_EXISTING,
+            StandardCopyOption.ATOMIC_MOVE);
+      } catch (AtomicMoveNotSupportedException e) {
+        log.warn("文件系统不支持原子替换，退化为普通替换（存在极小概率读到半写内容）: {}", path);
+        Files.move(tempFile, path, StandardCopyOption.REPLACE_EXISTING);
+      }
+      verifyOwnerOnly(path);
+    } finally {
+      try {
+        Files.deleteIfExists(tempFile);
+      } catch (IOException e) {
+        log.warn("清理临时配置文件失败: {}", tempFile, e);
+      }
+    }
+  }
+
+  private void restrictToOwner(Path path) throws IOException {
+    try {
+      Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rw-------"));
+    } catch (UnsupportedOperationException e) {
+      warnPosixPermissionUnsupported("把文件收紧为 0600", path);
+    }
+  }
+
+  /**
+   * Windows 等非 POSIX 文件系统无法设置 0600，只告警一次避免刷屏，具体保护依赖目录 ACL。
+   */
+  private void warnPosixPermissionUnsupported(String action, Path path) {
+    if (posixPermissionWarningLogged.compareAndSet(false, true)) {
+      log.warn("当前文件系统不支持 POSIX 权限，无法{}（后续同类告警折叠为 DEBUG），"
+          + "请确认配置目录 ACL 仅授予本机账号: {}", action, path);
+      return;
+    }
+    log.debug("当前文件系统不支持 POSIX 权限，跳过 {}: {}", action, path);
+  }
+
+  private void verifyOwnerOnly(Path path) throws IOException {
+    Set<PosixFilePermission> permissions;
+    try {
+      permissions = Files.getPosixFilePermissions(path);
+    } catch (UnsupportedOperationException e) {
+      warnPosixPermissionUnsupported("校验文件权限", path);
+      return;
+    }
+    boolean tooOpen = permissions.stream()
+        .anyMatch(permission -> permission.name().startsWith("GROUP_")
+            || permission.name().startsWith("OTHERS_"));
+    if (!tooOpen) {
+      return;
+    }
+    log.warn("检测到运行期配置权限过宽，已收紧为 rw-------: {}", path);
+    Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rw-------"));
+  }
+
+  /**
+   * 清理历史遗留的明文 API Key：替换为 {@code ${ENV}} 占位符，保留其余配置，不静默删除。
+   */
+  private void sanitizeLegacyPlaintextSecrets(Path path) {
+    if (!Files.exists(path)) {
+      return;
+    }
+    Path lockFile = path.getParent().resolve(path.getFileName() + ".lock");
+    try (FileChannel channel = FileChannel.open(lockFile,
+        StandardOpenOption.CREATE, StandardOpenOption.WRITE)) {
+      channel.lock();
+      List<String> lines = new ArrayList<>(Files.readAllLines(path, StandardCharsets.UTF_8));
+      boolean changed = false;
+      for (int index = 0; index < lines.size(); index++) {
+        Matcher matcher = PLAINTEXT_API_KEY_LINE.matcher(lines.get(index));
+        if (!matcher.matches()) {
+          continue;
+        }
+        String value = matcher.group(2).trim();
+        if (value.isEmpty() || value.startsWith("${") || value.startsWith("#")) {
+          continue;
+        }
+        String envKey = resolveEnvKeyForApiKey(lines, index);
+        lines.set(index, matcher.group(1) + "${" + envKey + "}");
+        changed = true;
+        log.warn("检测到 {} 第 {} 行存在明文 API Key（{}），已替换为 ${{{}}} 占位符；"
+            + "请把真实密钥配置到 .env 的 {} 中", path, index + 1, maskApiKey(value), envKey, envKey);
+      }
+      if (!changed) {
         return;
       }
-      String content = Files.readString(path, StandardCharsets.UTF_8);
-      if (content.contains(key + "=")) {
-        content = content.replaceAll("(?m)^" + Pattern.quote(key) + "=.*",
-            Matcher.quoteReplacement(key + "=" + value));
-      } else {
-        if (!content.endsWith("\n")) {
-          content += "\n";
-        }
-        content += key + "=" + value + "\n";
-      }
-      Files.writeString(path, content, StandardCharsets.UTF_8);
+      atomicWritePrivateFile(path, String.join("\n", lines) + "\n");
     } catch (IOException e) {
-      log.warn("写入 .env 失败: {}", e.getMessage());
+      throw new BusinessException(ErrorCode.PROVIDER_CONFIG_WRITE_FAILED,
+          "清理历史明文 API Key 失败: " + path, e);
     }
   }
 
-  private void updateEnvValue(String key, String value) {
-    writeEnvValue(key, value);
+  /**
+   * 按 YAML 缩进推断 api-key 所属的 provider / 语音分组，从而给出正确的环境变量名。
+   */
+  private String resolveEnvKeyForApiKey(List<String> lines, int apiKeyLineIndex) {
+    List<String> ancestors = new ArrayList<>();
+    int currentIndent = indentOf(lines.get(apiKeyLineIndex));
+    for (int index = apiKeyLineIndex - 1; index >= 0; index--) {
+      String line = lines.get(index);
+      if (line.isBlank() || line.trim().startsWith("#")) {
+        continue;
+      }
+      int indent = indentOf(line);
+      if (indent >= currentIndent) {
+        continue;
+      }
+      String key = extractMappingKey(line);
+      if (key == null) {
+        continue;
+      }
+      ancestors.add(0, key);
+      currentIndent = indent;
+      if (indent == 0) {
+        break;
+      }
+    }
+    if (ancestors.contains("providers") && !ancestors.isEmpty()) {
+      return toEnvKey(ancestors.get(ancestors.size() - 1));
+    }
+    if (ancestors.contains("qwen")) {
+      return BAILIAN_ENV_KEY;
+    }
+    return DEFAULT_PROVIDER_ENV_KEY;
   }
 
-  private void removeFromEnv(String key) {
-    if (envPath == null || envPath.isBlank()) return;
+  private String extractMappingKey(String line) {
+    String trimmed = line.trim();
+    int colon = trimmed.indexOf(':');
+    if (colon <= 0) {
+      return null;
+    }
+    return trimmed.substring(0, colon).trim();
+  }
+
+  private int indentOf(String line) {
+    int count = 0;
+    while (count < line.length() && line.charAt(count) == ' ') {
+      count++;
+    }
+    return count;
+  }
+
+  private void warnApiKeyNotPersisted(String target, String apiKey) {
+    log.warn("{} 的 API Key（{}）只在当前进程内存中生效，未写入 .env 或任何明文配置文件；"
+        + "重启后请通过环境变量重新提供", target, maskApiKey(apiKey));
+  }
+
+  private void refreshRegistry(String reason) {
     try {
-      Path path = Path.of(envPath);
-      if (!Files.exists(path)) return;
-      String content = Files.readString(path, StandardCharsets.UTF_8);
-      content = content.replaceAll("(?m)^" + Pattern.quote(key) + "=.*\\R?", "");
-      Files.writeString(path, content, StandardCharsets.UTF_8);
-    } catch (IOException e) {
-      log.warn("删除 .env 条目失败: {}", e.getMessage());
+      registry.reload();
+    } catch (RuntimeException e) {
+      log.warn("Provider 客户端缓存刷新失败，已提交的配置不会回滚，下次访问时会按最新配置重建: reason={}, error={}",
+          reason, e.getMessage(), e);
     }
   }
 

@@ -1,5 +1,6 @@
 import { request } from './request';
 import { streamSse } from './stream';
+import type { KnowledgeBaseItem as KnowledgeBaseItemSource } from './knowledgebase';
 
 // ========== 类型定义 ==========
 
@@ -26,17 +27,22 @@ export interface RagChatMessage {
   createdAt: string;
 }
 
-export interface KnowledgeBaseItem {
-  id: number;
-  name: string;
-  originalFilename: string;
-  fileSize: number;
-  contentType: string;
-  uploadedAt: string;
-  lastAccessedAt: string;
-  accessCount: number;
-  questionCount: number;
-}
+/**
+ * RAG 会话里只用到知识库的展示字段；以 knowledgebase 的完整类型为单一来源，
+ * 避免两处字段漂移（FEDGE-004）。
+ */
+export type KnowledgeBaseItem = Pick<
+  KnowledgeBaseItemSource,
+  | 'id'
+  | 'name'
+  | 'originalFilename'
+  | 'fileSize'
+  | 'contentType'
+  | 'uploadedAt'
+  | 'lastAccessedAt'
+  | 'accessCount'
+  | 'questionCount'
+>;
 
 export interface RagChatSessionDetail {
   id: number;

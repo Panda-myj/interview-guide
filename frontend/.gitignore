@@ -12,6 +12,10 @@ dist
 dist-ssr
 *.local
 
+# 包管理器：只保留 pnpm-lock.yaml，禁止提交 npm/yarn 锁文件
+package-lock.json
+yarn.lock
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

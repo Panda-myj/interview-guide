@@ -50,6 +50,7 @@ public class InterviewSessionCache {
     @Data
     public static class CachedSession implements Serializable {
         private String sessionId;
+        private Long ownerUserId;
         private String resumeText;
         private Long resumeId;
         private String questionsJson;  // 序列化的问题列表
@@ -59,10 +60,11 @@ public class InterviewSessionCache {
         public CachedSession() {
         }
 
-        public CachedSession(String sessionId, String resumeText, Long resumeId,
+        public CachedSession(String sessionId, Long ownerUserId, String resumeText, Long resumeId,
                             List<InterviewQuestionDTO> questions, int currentIndex,
                             SessionStatus status, ObjectMapper objectMapper) {
             this.sessionId = sessionId;
+            this.ownerUserId = ownerUserId;
             this.resumeText = resumeText;
             this.resumeId = resumeId;
             this.currentIndex = currentIndex;
@@ -86,12 +88,12 @@ public class InterviewSessionCache {
     /**
      * 保存会话到缓存
      */
-    public void saveSession(String sessionId, String resumeText, Long resumeId,
+    public void saveSession(String sessionId, Long ownerUserId, String resumeText, Long resumeId,
                            List<InterviewQuestionDTO> questions, int currentIndex,
                            SessionStatus status) {
         String key = buildSessionKey(sessionId);
         CachedSession cachedSession = new CachedSession(
-            sessionId, resumeText, resumeId, questions, currentIndex, status, objectMapper
+            sessionId, ownerUserId, resumeText, resumeId, questions, currentIndex, status, objectMapper
         );
 
         redisService.set(key, cachedSession, SESSION_TTL);
@@ -115,6 +117,11 @@ public class InterviewSessionCache {
             return Optional.of(session);
         }
         return Optional.empty();
+    }
+
+    public Optional<CachedSession> getSessionForOwner(String sessionId, Long ownerUserId) {
+        return getSession(sessionId)
+            .filter(session -> ownerUserId.equals(session.getOwnerUserId()));
     }
 
     /**
@@ -181,12 +188,12 @@ public class InterviewSessionCache {
     /**
      * 根据简历ID查找未完成的会话ID
      */
-    public Optional<String> findUnfinishedSessionId(Long resumeId) {
+    public Optional<String> findUnfinishedSessionId(Long resumeId, Long ownerUserId) {
         String key = buildResumeSessionKey(resumeId);
         String sessionId = redisService.get(key);
         if (sessionId != null) {
             // 验证会话是否仍然存在且未完成
-            Optional<CachedSession> sessionOpt = getSession(sessionId);
+            Optional<CachedSession> sessionOpt = getSessionForOwner(sessionId, ownerUserId);
             if (sessionOpt.isPresent() && isUnfinishedStatus(sessionOpt.get().getStatus())) {
                 return Optional.of(sessionId);
             } else {

@@ -1,8 +1,12 @@
 import axios, { AxiosInstance, AxiosRequestConfig } from 'axios';
+import { clearAuthSession, getAccessToken, setAuthSession, waitForAccessToken } from '../auth/session';
+import type { AuthResponse } from '../types/auth';
 
 declare module 'axios' {
   interface AxiosRequestConfig {
     skipResultTransform?: boolean;
+    skipAuthRefresh?: boolean;
+    _retryAfterRefresh?: boolean;
   }
 }
 
@@ -23,7 +27,55 @@ export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
 const instance: AxiosInstance = axios.create({
   baseURL: API_BASE_URL,
   timeout: 60000,
+  withCredentials: true,
 });
+
+let refreshPromise: Promise<string | null> | null = null;
+
+instance.interceptors.request.use((config) => {
+  const token = getAccessToken();
+  if (token && !config.headers.Authorization) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
+async function performRefresh(force: boolean, tokenAtStart: string | null): Promise<string | null> {
+  const execute = async () => {
+    const existing = getAccessToken();
+    if (existing && (!force || existing !== tokenAtStart)) {
+      return existing;
+    }
+    const response = await instance.post<Result<AuthResponse>>(
+      '/api/auth/refresh',
+      undefined,
+      { skipResultTransform: true, skipAuthRefresh: true },
+    );
+    const result = response.data;
+    if (!isResult(result) || result.code !== SUCCESS_CODE || !result.data) {
+      clearAuthSession();
+      return null;
+    }
+    const auth = result.data as AuthResponse;
+    setAuthSession(auth.accessToken, auth.user);
+    return auth.accessToken;
+  };
+
+  if (typeof navigator !== 'undefined' && 'locks' in navigator) {
+    return navigator.locks.request('ai-interview-auth-refresh', execute);
+  }
+  return execute();
+}
+
+export async function refreshAccessToken(force = false): Promise<string | null> {
+  if (!refreshPromise) {
+    const tokenAtStart = getAccessToken();
+    refreshPromise = performRefresh(force, tokenAtStart).finally(() => {
+      refreshPromise = null;
+    });
+  }
+  return refreshPromise;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object';
@@ -135,6 +187,31 @@ instance.interceptors.response.use(
   async (error) => {
     // 有响应的情况：后端返回了结果（即使是错误）
     if (error.response) {
+      const config = error.config as AxiosRequestConfig | undefined;
+      const status = error.response.status;
+      if (status === 401
+        && config
+        && !config.skipAuthRefresh
+        && !config._retryAfterRefresh
+        && !config.url?.includes('/api/auth/refresh')) {
+        config._retryAfterRefresh = true;
+        const token = await refreshAccessToken(true);
+        if (token) {
+          config.headers = {
+            ...config.headers,
+            Authorization: `Bearer ${token}`,
+          };
+          return instance.request(config);
+        }
+        const broadcastToken = await waitForAccessToken();
+        if (broadcastToken) {
+          config.headers = {
+            ...config.headers,
+            Authorization: `Bearer ${broadcastToken}`,
+          };
+          return instance.request(config);
+        }
+      }
       const { data } = error.response;
       // 尝试解析 Result 格式
       const responseError = await getErrorFromResponseData(data);

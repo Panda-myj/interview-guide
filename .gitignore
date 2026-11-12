@@ -11,6 +11,15 @@ build
 # Environment variables
 .env
 test-output.txt
+
+# 运行期 Provider / 语音配置（只允许写本机受限目录，绝不入库）
+.interview-guide/
+**/runtime-config.yml
+**/runtime-config.yml.lock
+**/.runtime-config*.tmp
+.pnpm-store/
+frontend/node_modules/
+frontend/dist/
 # IDEA code analysis
 qodana.yaml
 

@@ -22,6 +22,7 @@ public class VoiceInterviewProperties {
     private AudioConfig audio = new AudioConfig();
     private QwenConfig qwen = new QwenConfig();
     private OpeningConfig opening = new OpeningConfig();
+    private LifecycleConfig lifecycle = new LifecycleConfig();
 
     /**
      * 语音面试单轮面试官回复最大字符数（超出会截断到句子边界）。
@@ -161,5 +162,35 @@ public class VoiceInterviewProperties {
             "你好，我是本场面试官。先做一道算法与数据结构热身题：请你从“哈希表/堆/栈/队列/树/图”里选两个，结合一道你熟悉的题，口述“为什么选这个结构、核心步骤、时间复杂度、空间复杂度、边界条件与反例”。本场不需要写代码，重点看你的思路和取舍。";
         private String backendQuestion =
             "你好，我是本场面试官。第一个问题：请用 1 分钟介绍一个你深度参与的项目，按三点回答：业务目标、你负责的核心模块、核心技术栈。说完我会立刻追问一个关键技术决策。";
+    }
+
+    /**
+     * 会话生命周期配置：租约、心跳、重复连接窗口、孤儿会话回收与审计保留。
+     * 所有时间单位为秒/毫秒，默认值按「单机开发环境 + 浏览器端 WebSocket」调优。
+     */
+    @Data
+    public static class LifecycleConfig {
+        /** 租约 TTL（秒）：超过该时间未续期即视为连接已失联 */
+        private int leaseTtlSeconds = 45;
+        /** 服务端心跳 ping 间隔（秒），客户端需回 pong */
+        private int heartbeatIntervalSeconds = 10;
+        /** 心跳检查任务执行间隔（毫秒） */
+        private long heartbeatCheckIntervalMs = 10_000;
+        /** 超过该时长未收到任何客户端帧即判定连接死亡（秒） */
+        private int heartbeatTimeoutSeconds = 60;
+        /** 同一会话在该窗口内的第二个连接直接拒绝，窗口外允许接管（秒） */
+        private int duplicateConnectionWindowSeconds = 5;
+        /** IN_PROGRESS 会话在租约缺失时的回收宽限期（秒） */
+        private int orphanReconcileGraceSeconds = 90;
+        /** 孤儿会话回收任务执行间隔（毫秒） */
+        private long orphanReconcileIntervalMs = 60_000;
+        /** 单连接允许的协议异常（坏帧/未知类型）次数上限，超过则断开 */
+        private int maxProtocolViolations = 10;
+        /** 单会话 ASR 自动重连次数上限，超过则降级为文字提交 */
+        private int maxAsrRestarts = 3;
+        /** 收尾补偿最大重试次数，超过进入死信队列 */
+        private int finalizeMaxAttempts = 3;
+        /** 审计事件在 Redis 中的保留天数 */
+        private int auditTtlDays = 7;
     }
 }

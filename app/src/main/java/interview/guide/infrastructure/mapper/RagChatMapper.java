@@ -1,6 +1,5 @@
 package interview.guide.infrastructure.mapper;
 
-import interview.guide.modules.knowledgebase.model.KnowledgeBaseEntity;
 import interview.guide.modules.knowledgebase.model.KnowledgeBaseListItemDTO;
 import interview.guide.modules.knowledgebase.model.RagChatDTO.MessageDTO;
 import interview.guide.modules.knowledgebase.model.RagChatDTO.SessionDTO;
@@ -10,7 +9,6 @@ import interview.guide.modules.knowledgebase.model.RagChatMessageEntity;
 import interview.guide.modules.knowledgebase.model.RagChatSessionEntity;
 import org.mapstruct.*;
 
-import java.util.Collection;
 import java.util.List;
 
 /**
@@ -40,18 +38,7 @@ public interface RagChatMapper {
      * 将消息实体列表转换为消息DTO列表
      */
     List<MessageDTO> toMessageDTOList(List<RagChatMessageEntity> messages);
-    
-    /**
-     * 将知识库实体集合转换为知识库名称列表
-     * 支持 Set 和 List 类型
-     */
-    @Named("extractKnowledgeBaseNames")
-    default List<String> extractKnowledgeBaseNames(Collection<KnowledgeBaseEntity> knowledgeBases) {
-        return knowledgeBases.stream()
-            .map(KnowledgeBaseEntity::getName)
-            .toList();
-    }
-    
+
     /**
      * 从会话实体中提取知识库ID列表
      */
@@ -69,12 +56,22 @@ public interface RagChatMapper {
     }
     
     /**
-     * 将会话实体转换为会话列表项DTO
-     * 需要特殊处理：提取知识库名称列表和处理isPinned的null值
+     * 将会话实体转换为会话列表项DTO（批量填充知识库名称版本，PERF-002）。
+     * 知识库名称由 Service 层一次批量查询后传入，
+     * 避免逐会话懒加载 @ManyToMany knowledgeBases 触发 N+1 查询。
      */
-    @Mapping(target = "knowledgeBaseNames", source = "session.knowledgeBases", qualifiedByName = "extractKnowledgeBaseNames")
-    @Mapping(target = "isPinned", source = "session", qualifiedByName = "getIsPinnedWithDefault")
-    SessionListItemDTO toSessionListItemDTO(RagChatSessionEntity session);
+    default SessionListItemDTO toSessionListItemDTO(
+            RagChatSessionEntity session,
+            List<String> knowledgeBaseNames) {
+        return new SessionListItemDTO(
+            session.getId(),
+            session.getTitle(),
+            session.getMessageCount(),
+            knowledgeBaseNames,
+            session.getUpdatedAt(),
+            getIsPinnedWithDefault(session)
+        );
+    }
     
     /**
      * 处理isPinned的null值，默认为false

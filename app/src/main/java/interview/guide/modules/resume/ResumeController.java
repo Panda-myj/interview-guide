@@ -1,6 +1,7 @@
 package interview.guide.modules.resume;
 
 import interview.guide.common.annotation.RateLimit;
+import interview.guide.common.exception.BusinessException;
 import interview.guide.common.result.Result;
 import interview.guide.modules.resume.model.ResumeDetailDTO;
 import interview.guide.modules.resume.model.ResumeListItemDTO;
@@ -47,17 +48,7 @@ public class ResumeController {
      *
      * @param file 简历文件（支持PDF、DOCX、DOC、TXT、MD等）
      * @return 简历分析结果，包含评分和建议
-     *
-     * ⚠️ 反面教材：返回 Map 丢失了类型安全，重构时应改为强类型 DTO
      */
-    // consumes 是 Spring MVC 中用于声明该接口只接受特定 Content-Type 请求体的过滤条件。
-//    它的核心作用不是“告诉前端怎么传参”，而是在服务端做请求匹配与拦截
-    //consumes 不是文档注解，而是运行时过滤器
-    /*@PostMapping(
-    value = "/api/resumes/upload",
-    consumes = MediaType.MULTIPART_FORM_DATA_VALUE,  // 只接收 multipart
-    produces = MediaType.APPLICATION_JSON_VALUE       // 只返回 JSON
-)*/
     @PostMapping(value = "/api/resumes/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     @RateLimit(dimension = RateLimit.Dimension.GLOBAL, count = 5)
     @RateLimit(dimension = RateLimit.Dimension.IP, count = 5)
@@ -72,10 +63,14 @@ public class ResumeController {
 
     /**
      * 获取所有简历列表
+     *
+     * <p>当前契约返回 List（截断上限 200，默认 50）。后续如需翻页/总数，
+     * 应演进为 Page 契约（content + totalElements），前端同步改造。</p>
      */
     @GetMapping("/api/resumes")
-    public Result<List<ResumeListItemDTO>> getAllResumes() {
-        List<ResumeListItemDTO> resumes = historyService.getAllResumes();
+    public Result<List<ResumeListItemDTO>> getAllResumes(
+        @RequestParam(defaultValue = "50") int size) {
+        List<ResumeListItemDTO> resumes = historyService.getAllResumes(size);
         return Result.success(resumes);
     }
 
@@ -107,10 +102,34 @@ public class ResumeController {
 //            如果是 application/pdf → 浏览器认为这是文件，触发内置 PDF 预览器或弹出下载框。
 //            如果是 application/octet-stream → 浏览器不认识，直接弹出下载框。
                 .body(result.pdfBytes());
+        } catch (BusinessException e) {
+            throw e;
         } catch (Exception e) {
             log.error("导出PDF失败: resumeId={}", id, e);
             return ResponseEntity.internalServerError().build();
         }
+    }
+
+    @GetMapping("/api/resumes/{id}/file")
+    public ResponseEntity<byte[]> downloadOriginalFile(@PathVariable Long id) {
+        var result = historyService.downloadOriginal(id);
+        String filename = URLEncoder.encode(result.filename(), StandardCharsets.UTF_8)
+            .replaceAll("\\+", "%20");
+        MediaType mediaType;
+        try {
+            mediaType = result.contentType() == null
+                ? MediaType.APPLICATION_OCTET_STREAM
+                : MediaType.parseMediaType(result.contentType());
+        } catch (IllegalArgumentException e) {
+            mediaType = MediaType.APPLICATION_OCTET_STREAM;
+        }
+        return ResponseEntity.ok()
+            .header(
+                HttpHeaders.CONTENT_DISPOSITION,
+                "attachment; filename*=UTF-8''" + filename
+            )
+            .contentType(mediaType)
+            .body(result.content());
     }
 
     /**

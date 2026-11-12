@@ -18,6 +18,7 @@ import {
   type InterviewMode,
   DIFFICULTY_OPTIONS,
 } from '../hooks/useInterviewConfig';
+import { ROUTES, path } from '../constants/routes';
 
 // 统一的面试记录项
 interface RecentInterviewItem {
@@ -97,7 +98,7 @@ export default function InterviewHubPage() {
     }
 
     if (config.mode === 'text') {
-      navigate('/interview', {
+      navigate(ROUTES.interview, {
         state: {
           resumeId: config.resumeId,
           interviewConfig: {
@@ -113,7 +114,7 @@ export default function InterviewHubPage() {
       });
     } else {
       const params = new URLSearchParams({ skillId: config.skillId, difficulty: config.difficulty });
-      navigate(`/voice-interview?${params.toString()}`, {
+      navigate(`${ROUTES.voiceInterview}?${params.toString()}`, {
         state: {
           voiceConfig: {
             skillId: config.skillId,
@@ -461,7 +462,7 @@ export default function InterviewHubPage() {
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-bold text-slate-800 dark:text-white">最近面试记录</h2>
           <Link
-            to="/interviews"
+            to={ROUTES.interviewHistory}
             className="text-sm text-primary-500 hover:text-primary-600 font-medium transition-colors"
           >
             查看全部
@@ -489,9 +490,9 @@ export default function InterviewHubPage() {
                   transition={{ delay: index * 0.05 }}
                   onClick={() => {
                     if (item.type === 'text') {
-                      navigate(`/interviews/${item.id}`);
+                      navigate(path.interviewDetail(item.id));
                     } else if (item.voiceSessionId) {
-                      navigate(`/voice-interview/${item.voiceSessionId}/evaluation`);
+                      navigate(path.voiceEvaluation(item.voiceSessionId));
                     }
                   }}
                   className="flex items-center gap-4 p-4 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-700/50 transition-colors cursor-pointer group"

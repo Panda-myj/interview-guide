@@ -1,6 +1,12 @@
 package interview.guide.modules.voiceinterview.service;
 
+import interview.guide.common.ai.LlmProviderRegistry;
 import interview.guide.common.exception.BusinessException;
+import interview.guide.modules.auth.model.UserEntity;
+import interview.guide.modules.auth.security.CurrentUserService;
+import interview.guide.modules.resume.repository.ResumeRepository;
+import interview.guide.modules.voiceinterview.listener.VoiceEvaluateStreamProducer;
+import interview.guide.modules.voiceinterview.repository.VoiceInterviewEvaluationRepository;
 import interview.guide.modules.voiceinterview.config.VoiceInterviewProperties;
 import interview.guide.modules.voiceinterview.dto.CreateSessionRequest;
 import interview.guide.modules.voiceinterview.dto.SessionResponseDTO;
@@ -10,7 +16,6 @@ import interview.guide.modules.voiceinterview.model.VoiceInterviewSessionStatus;
 import interview.guide.modules.voiceinterview.repository.VoiceInterviewMessageRepository;
 import interview.guide.modules.voiceinterview.repository.VoiceInterviewSessionRepository;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -48,12 +53,7 @@ import static org.mockito.Mockito.*;
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
-@Disabled(
-    "Pending rewrite: createSession 现依赖 LlmProviderRegistry / 全局默认 Provider 回退逻辑，"
-        + "而本测试的 setUp 未向 VoiceInterviewService 注入 LlmProviderRegistry "
-        + "mock，导致 NPE。留作下一步独立 PR 修复，避免与 llm-provider 修复耦合。"
-)
-@DisplayName("语音面试服务测试（待重写）")
+@DisplayName("语音面试服务测试")
 class VoiceInterviewServiceTest {
 
     @Mock
@@ -70,6 +70,21 @@ class VoiceInterviewServiceTest {
 
     @Mock
     private RBucket<VoiceInterviewSessionEntity> bucket;
+
+    @Mock
+    private VoiceInterviewEvaluationRepository evaluationRepository;
+
+    @Mock
+    private VoiceEvaluateStreamProducer voiceEvaluateStreamProducer;
+
+    @Mock
+    private LlmProviderRegistry llmProviderRegistry;
+
+    @Mock
+    private CurrentUserService currentUserService;
+
+    @Mock
+    private ResumeRepository resumeRepository;
 
     @InjectMocks
     private VoiceInterviewService voiceInterviewService;
@@ -93,6 +108,11 @@ class VoiceInterviewServiceTest {
 
         // Setup properties mock to return default phase config
         lenient().when(properties.getPhase()).thenReturn(phaseConfig);
+
+        // 多租户：createSession 会从 CurrentUserService 取归属用户，未 stub 会直接 NPE
+        UserEntity owner = new UserEntity();
+        owner.setId(1L);
+        lenient().when(currentUserService.getRequiredUser()).thenReturn(owner);
     }
 
     // ==================== 会话创建测试 ====================
@@ -135,7 +155,7 @@ class VoiceInterviewServiceTest {
             assertNotNull(response.getWebSocketUrl());
 
             verify(sessionRepository, times(1)).save(any(VoiceInterviewSessionEntity.class));
-            verify(bucket, times(1)).set(any(), eq(1L), any());
+            verify(bucket, times(1)).set(any(VoiceInterviewSessionEntity.class), any(Duration.class));
         }
 
         @Test
@@ -224,6 +244,8 @@ class VoiceInterviewServiceTest {
 
             when(sessionRepository.findById(sessionId)).thenReturn(Optional.of(session));
             when(sessionRepository.save(any(VoiceInterviewSessionEntity.class))).thenReturn(session);
+            // 结束会话走条件更新（PERF-001）：返回 1 表示本次调用赢得状态迁移
+            when(sessionRepository.updateStatusConditionally(anyLong(), any(), anyList())).thenReturn(1);
 
             // When
             voiceInterviewService.endSession(sessionId.toString());
@@ -293,7 +315,8 @@ class VoiceInterviewServiceTest {
 
             when(sessionRepository.findById(sessionId)).thenReturn(Optional.of(pausedSession));
             when(sessionRepository.save(any(VoiceInterviewSessionEntity.class))).thenReturn(pausedSession);
-            when(messageRepository.findBySessionIdOrderBySequenceNumAsc(sessionId)).thenReturn(history);
+            when(sessionRepository.updateStatusConditionally(anyLong(), any(), anyList())).thenReturn(1);
+            when(messageRepository.countBySessionId(sessionId)).thenReturn((long) history.size());
 
             // When
             SessionResponseDTO response = voiceInterviewService.resumeSession(sessionId.toString());
@@ -305,7 +328,7 @@ class VoiceInterviewServiceTest {
             assertEquals(30, response.getPlannedDuration());
 
             // Verify conversation history was loaded
-            verify(messageRepository, times(1)).findBySessionIdOrderBySequenceNumAsc(sessionId);
+            verify(messageRepository, times(1)).countBySessionId(sessionId);
             verify(sessionRepository, times(1)).save(argThat(session ->
                     session.getStatus() == VoiceInterviewSessionStatus.IN_PROGRESS &&
                     session.getResumedAt() != null
@@ -317,12 +340,14 @@ class VoiceInterviewServiceTest {
         void testResumeSession_InvalidStatus() {
             // Given
             Long sessionId = 1L;
-            VoiceInterviewSessionEntity inProgressSession = VoiceInterviewSessionEntity.builder()
+            // IN_PROGRESS 重复恢复是幂等成功，真正不可恢复的是已结束会话
+            VoiceInterviewSessionEntity completedSession = VoiceInterviewSessionEntity.builder()
                     .id(sessionId)
-                    .status(VoiceInterviewSessionStatus.IN_PROGRESS)
+                    .currentPhase(VoiceInterviewSessionEntity.InterviewPhase.COMPLETED)
+                    .status(VoiceInterviewSessionStatus.COMPLETED)
                     .build();
 
-            when(sessionRepository.findById(sessionId)).thenReturn(Optional.of(inProgressSession));
+            when(sessionRepository.findById(sessionId)).thenReturn(Optional.of(completedSession));
 
             // When & Then
             assertThrows(BusinessException.class, () ->
@@ -378,7 +403,7 @@ class VoiceInterviewServiceTest {
             // Then
             assertEquals(VoiceInterviewSessionEntity.InterviewPhase.TECH, session.getCurrentPhase());
             verify(sessionRepository, times(1)).save(session);
-            verify(bucket, times(1)).set(any(), eq(1L), any());
+            verify(bucket, times(1)).set(any(VoiceInterviewSessionEntity.class), any(Duration.class));
         }
 
         @Test
@@ -393,10 +418,9 @@ class VoiceInterviewServiceTest {
 
             when(sessionRepository.findById(sessionId)).thenReturn(Optional.of(session));
 
-            // When
-            voiceInterviewService.startPhase(sessionId.toString(), "INVALID_PHASE");
-
-            // Then - 阶段不应改变
+            // When & Then - 非法阶段必须显式失败，不能静默停在旧阶段
+            assertThrows(BusinessException.class, () ->
+                    voiceInterviewService.startPhase(sessionId.toString(), "INVALID_PHASE"));
             assertEquals(VoiceInterviewSessionEntity.InterviewPhase.INTRO, session.getCurrentPhase());
             verify(sessionRepository, never()).save(any());
         }
@@ -487,11 +511,8 @@ class VoiceInterviewServiceTest {
                     .build();
 
             when(sessionRepository.findById(sessionId)).thenReturn(Optional.of(session));
-            when(messageRepository.findBySessionIdOrderBySequenceNumAsc(sessionId))
-                    .thenReturn(Arrays.asList(
-                            VoiceInterviewMessageEntity.builder().sequenceNum(1).build(),
-                            VoiceInterviewMessageEntity.builder().sequenceNum(2).build()
-                    ));
+            // 序号由 countBySessionId + 1 计算，不再依赖全量历史列表
+            when(messageRepository.countBySessionId(sessionId)).thenReturn(2L);
 
             // When
             voiceInterviewService.saveMessage(sessionId.toString(), userText, aiText);

@@ -1,0 +1,23 @@
+{
+  "path": "/api/interview/sessions?page=0&size=20",
+  "startedAt": "2026-11-05T10:48:42.930Z",
+  "finishedAt": "2026-11-05T10:49:42.931Z",
+  "concurrency": 10,
+  "durationMs": 60000,
+  "requests": 217309,
+  "ok": 0,
+  "errors": 217309,
+  "errorRate": 1,
+  "rps": 3621.82,
+  "latencyP50": 2.5,
+  "latencyP95": 4.6,
+  "latencyP99": 6.1,
+  "latencyMax": 103.6,
+  "sampleErrors": [
+    "Unexpected end of JSON input",
+    "Unexpected end of JSON input",
+    "Unexpected end of JSON input",
+    "Unexpected end of JSON input",
+    "Unexpected end of JSON input"
+  ]
+}

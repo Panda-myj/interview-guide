@@ -100,34 +100,32 @@ public class ResumeGradingService {
             String systemPromptWithFormat = systemPrompt + "\n\n" + outputConverter.getFormat();
             
             // 调用AI
-            ResumeAnalysisResponseDTO dto;
-            try {
-                ChatClient chatClient = llmProviderRegistry.getDefaultChatClient();
-                dto = structuredOutputInvoker.invoke(
-                    chatClient,
-                    systemPromptWithFormat,
-                    userPrompt,
-                    outputConverter,
-                    ErrorCode.RESUME_ANALYSIS_FAILED,
-                    "简历分析失败：",
-                    "简历分析",
-                    log
-                );
-                log.debug("AI响应解析成功: overallScore={}", dto.overallScore());
-            } catch (Exception e) {
-                log.error("简历分析AI调用失败: {}", e.getMessage(), e);
-                throw new BusinessException(ErrorCode.RESUME_ANALYSIS_FAILED, "简历分析失败：" + e.getMessage());
-            }
-            
+            ChatClient chatClient = llmProviderRegistry.getDefaultChatClient();
+            ResumeAnalysisResponseDTO dto = structuredOutputInvoker.invoke(
+                chatClient,
+                systemPromptWithFormat,
+                userPrompt,
+                outputConverter,
+                ErrorCode.RESUME_ANALYSIS_FAILED,
+                "简历分析失败：",
+                "简历分析",
+                log
+            );
+            log.debug("AI响应解析成功: overallScore={}", dto.overallScore());
+
             // 转换为业务对象
             ResumeAnalysisResponse result = convertToResponse(dto, resumeText);
             log.info("简历分析完成，总分: {}", result.overallScore());
             
             return result;
             
+        } catch (BusinessException e) {
+            // 业务异常原样上抛，交由异步任务标记 FAILED，不返回“0 分成功”的假结果
+            throw e;
         } catch (Exception e) {
-            log.error("简历分析失败: {}", e.getMessage(), e);
-            return createErrorResponse(resumeText, e.getMessage());
+            log.error("简历分析失败: resumeTextLength={}", resumeText.length(), e);
+            throw new BusinessException(
+                ErrorCode.RESUME_ANALYSIS_FAILED, "简历分析失败，请稍后重试");
         }
     }
     
@@ -160,19 +158,4 @@ public class ResumeGradingService {
     /**
      * 创建错误响应
      */
-    private ResumeAnalysisResponse createErrorResponse(String originalText, String errorMessage) {
-        return new ResumeAnalysisResponse(
-            0,
-            new ScoreDetail(0, 0, 0, 0, 0),
-            "分析过程中出现错误: " + errorMessage,
-            List.of(),
-            List.of(new Suggestion(
-                "系统",
-                "高",
-                "AI分析服务暂时不可用",
-                "请稍后重试，或检查AI服务是否正常运行"
-            )),
-            originalText
-        );
-    }
 }

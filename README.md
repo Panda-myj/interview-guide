@@ -11,7 +11,6 @@
 
 </div>
 
-
 ---
 
 ## 项目介绍
@@ -21,14 +20,6 @@ InterviewGuide 是一个集成了简历分析、模拟面试（文字 + 语音�
 ## 系统架构
 
 ![系统架构图](https://oss.javaguide.cn/xingqiu/pratical-project/interview-guide/interview-guide-architecture-diagram.png)
-
-## 配套教程
-
-本项目承诺**完整功能免费开源**，也不会做所谓的 Pro 版或“付费解锁核心功能”之类的设计。
-
-如果你想学习这个项目，或者希望把它作为个人项目经历 / 毕设选题，我也整理了一套相对细致的教程：从基础设施搭建、核心业务实现，到最后如何在面试中讲清楚思路与亮点，尽量把容易卡住的地方讲透。
-
-如果你确实需要更系统的辅导，可以点这里了解详情（**教程为付费内容**，主要是想覆盖一些时间成本，望理解，感谢支持）：[《SpringAI 智能面试平台+RAG 知识库》](https://javaguide.cn/zhuanlan/interview-guide.html)。
 
 ## 技术栈
 
@@ -263,8 +254,6 @@ interview-guide/
 
 ## 快速开始
 
-环境要求：问ai，配置环境
-
 | 依赖          | 版本 | 必需 | 说明                                     |
 | ------------- | ---- | ---- | ---------------------------------------- |
 | JDK           | 21+  | 是   | 开发语言                                 |
@@ -331,7 +320,7 @@ docker compose -f docker-compose.dev.yml down -v
 > **注意**：应用启动时会自动检查并创建 `interview-guide` Bucket。使用 `docker-compose.dev.yml` + `:app:bootRun` 时，请确保 `.env` 中的 `APP_STORAGE_ACCESS_KEY` / `APP_STORAGE_SECRET_KEY` 与 RustFS 账号一致，例如都设为 `rustfsadmin`。如果本地已有 MinIO 或其他 S3 兼容存储，也可以直接使用，在 `.env` 中修改 `APP_STORAGE_*` 配置即可。
 
 > **IDEA Docker Debug 提示**：如果在 macOS 上使用 IntelliJ IDEA 的 Docker 调试方式启动后端，遇到 `mounts denied: The path /Applications/IntelliJ IDEA.app/Contents/lib is not shared from the host`，请在 Docker Desktop 的 `Settings -> Resources -> File Sharing` 中加入 `/Applications/IntelliJ IDEA.app/Contents/lib`（或整个 `/Applications/IntelliJ IDEA.app`）以及当前项目目录，然后重启 Docker/IDEA 后再运行。普通 `./gradlew :app:bootRun` 和 `docker compose` 启动不需要这个额外共享路径。
- 
+
 如果是首次启动 RustFS，需要手动创建 bucket： 浏览器访问 http://localhost:9001,用 rustfsadmin / rustfsadmin 登录 ,创建名为 interview-guide 的 bucket
 ### 4. 启动应用
 
@@ -354,6 +343,28 @@ pnpm dev
 ```
 
 前端服务启动于 `http://localhost:5173`
+
+### 用户登录
+
+首次使用手机号验证码登录。开发环境默认使用 Mock 短信，验证码会显示在登录页；生产环境必须配置阿里云短信和以下变量：
+
+```dotenv
+AUTH_JWT_SECRET=至少32字节随机字符串
+APP_AUTH_BOOTSTRAP_PHONE=+8618913371131
+APP_AUTH_SMS_PROVIDER=aliyun
+ALIYUN_SMS_ACCESS_KEY_ID=
+ALIYUN_SMS_ACCESS_KEY_SECRET=
+ALIYUN_SMS_SIGN_NAME=
+ALIYUN_SMS_LOGIN_CODE_TEMPLATE=
+ALIYUN_SMS_LOGIN_ALERT_TEMPLATE=
+```
+
+本地 Mock 模式（`APP_AUTH_SMS_PROVIDER=mock`）首次启动会执行 `V9__consolidate_mock_admin_ownership.sql`（Flyway 每个版本只执行一次）：
+把 `APP_AUTH_BOOTSTRAP_PHONE` 对应账号提升为唯一管理员，将所有文件与面试记录归入该账号，
+注销其余账号并清空旧登录态；手机号验证码登录链路保持不变。该迁移仅在 mock 通道生效，
+真实短信通道与生产环境会自动跳过。
+
+认证流程、Redis Key、接口练习和多用户隔离说明见 [docs/auth-multitenancy-learning.md](docs/auth-multitenancy-learning.md)。
 
 
 ## Docker 快速部署
@@ -402,19 +413,18 @@ docker-compose up -d --build
 - 关闭 SQL 打印，收紧 CORS 白名单，Actuator 默认只暴露 `health,info`，健康详情不外泄；
 - 启用反向代理转发头，并把日志写入文件（挂载 `app_logs` 卷持久化）。
 
-**首次部署空库**时表尚不存在，`validate` 会导致启动失败，请先做一次性初始化，建表后立即改回。在根目录 `.env` 中临时添加：
+数据库结构现由 Flyway 管理。空库会自动执行 `V1` 基线迁移和 `V2` 认证/多租户迁移；已有数据库通过 `baseline-on-migrate` 直接执行增量迁移，不再需要临时开启 Hibernate 自动建表。
 
 ```bash
-# .env（仅首次建表时临时添加两行）
-JPA_DDL_AUTO=update
+# .env（仅首次创建 pgvector 表时临时添加；Flyway 负责其他业务表）
 PGVECTOR_INIT_SCHEMA=true
 ```
 
 ```bash
-# 建表
+# 首次启动
 docker compose up -d --build
 
-# 确认表已创建后，从 .env 删除上面两行，恢复 validate / false 并重新部署
+# 确认 vector_store 创建后，从 .env 删除该行，恢复 false 并重新部署
 docker compose up -d --build app
 ```
 

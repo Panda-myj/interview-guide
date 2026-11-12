@@ -8,6 +8,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Clock;
 import java.time.LocalDateTime;
 
 @Slf4j
@@ -16,12 +17,13 @@ import java.time.LocalDateTime;
 public class ScheduleStatusUpdater {
 
     private final InterviewScheduleRepository repository;
+    private final Clock clock;
 
     @Scheduled(cron = "0 0 * * * ?")
     @Transactional
     public void updateExpiredInterviews() {
         int updated = repository.updateStatusByStatusAndInterviewTimeBefore(
-            InterviewStatus.CANCELLED, InterviewStatus.PENDING, LocalDateTime.now());
+            InterviewStatus.CANCELLED, InterviewStatus.PENDING, LocalDateTime.now(clock));
 
         if (updated > 0) {
             log.info("已将 {} 条过期面试标记为已取消", updated);

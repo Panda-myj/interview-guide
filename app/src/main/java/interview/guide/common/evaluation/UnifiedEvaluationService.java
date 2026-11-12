@@ -4,6 +4,7 @@ import interview.guide.common.ai.StructuredOutputInvoker;
 import interview.guide.common.evaluation.EvaluationReport.CategoryScore;
 import interview.guide.common.evaluation.EvaluationReport.QuestionEvaluation;
 import interview.guide.common.evaluation.EvaluationReport.ReferenceAnswer;
+import interview.guide.common.exception.BusinessException;
 import interview.guide.common.exception.ErrorCode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -42,7 +43,9 @@ public class UnifiedEvaluationService {
     private final PromptTemplate summarySystemPromptTemplate;
     private final PromptTemplate summaryUserPromptTemplate;
     private final BeanOutputConverter<SummaryDTO> summaryOutputConverter;
-    //重试与降级：StructuredOutputInvoker 封装了异常捕获，单批失败返回 null 而非抛异常，后续用“0分+占位语”兜底，保证整个面试流程不中断。
+    //重试：StructuredOutputInvoker 内部已做重试与熔断，重试耗尽后抛 BusinessException；
+    //批次评估失败必须让整次评估失败（交由异步任务标记 FAILED 并重试），不允许按 0 分兜底返回“成功报告”。
+    //只有二次汇总（评语/亮点文字）失败允许降级到批次聚合结果，因为它不影响分数。
     private final StructuredOutputInvoker structuredOutputInvoker;
     private final int evaluationBatchSize;
     private final ResourceLoader resourceLoader;
@@ -185,11 +188,15 @@ public class UnifiedEvaluationService {
                 chatClient, systemPromptWithFormat, userPrompt, outputConverter,
                 ErrorCode.INTERVIEW_EVALUATION_FAILED, "批次评估失败：", "批次评估", log
             );
+        } catch (BusinessException e) {
+            // 已是业务异常（含错误码），原样上抛，避免被二次包装丢失错误码
+            throw e;
         } catch (Exception e) {
-            log.error("批次评估失败: sessionId={}, batchSize={}, error={}",
-                sessionId, batch.size(), e.getMessage(), e);
-            // 返回空报告，让合并逻辑用零分兜底
-            return null;
+            // 批次评估失败必须让整次评估失败：返回 null 会让合并逻辑按 0 分兜底，
+            // 异步任务被误标记为成功，用户拿到一份“全 0 分”的报告且无法重试
+            log.error("批次评估失败: sessionId={}, batchSize={}", sessionId, batch.size(), e);
+            throw new BusinessException(ErrorCode.INTERVIEW_EVALUATION_FAILED,
+                "面试评估失败，请稍后重试", e);
         }
     }
 
@@ -279,7 +286,7 @@ public class UnifiedEvaluationService {
             List<String> improvements = sanitizeItems(dto != null ? dto.improvements() : null, fallbackImprovements);
             return new SummaryDTO(feedback, strengths, improvements);
         } catch (Exception e) {
-            log.warn("二次汇总评估失败，降级到批次聚合结果: sessionId={}, error={}", sessionId, e.getMessage());
+            log.warn("二次汇总评估失败，降级到批次聚合结果: sessionId={}", sessionId, e);
             return new SummaryDTO(fallbackFeedback, fallbackStrengths, fallbackImprovements);
         }
     }

@@ -36,6 +36,11 @@ public class LlmProviderProperties {
         private String apiKeyEncryptionKey;
         private boolean requireEncryptionKey = true;
         private boolean allowFallbackEncryptionKey = false;
+        /**
+         * 是否允许 Provider / 语音服务指向本机或内网地址。
+         * 默认拒绝（防 SSRF）；本地调试 lmstudio 等场景才显式开启，生产环境必须保持 false。
+         */
+        private boolean allowLocalEndpoints = false;
     }
 
     @Data

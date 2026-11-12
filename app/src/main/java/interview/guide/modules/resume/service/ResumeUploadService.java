@@ -11,6 +11,7 @@ import interview.guide.modules.interview.model.ResumeAnalysisResponse;
 import interview.guide.modules.resume.listener.AnalyzeStreamProducer;
 import interview.guide.modules.resume.model.ResumeEntity;
 import interview.guide.modules.resume.repository.ResumeRepository;
+import interview.guide.modules.auth.security.CurrentUserService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -36,6 +37,7 @@ public class ResumeUploadService {
     private final AnalyzeStreamProducer analyzeStreamProducer;
     private final ResumeRepository resumeRepository;
     private final TransactionalExecutor transactionalExecutor;
+    private final CurrentUserService currentUserService;
 
     private static final long MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
@@ -79,7 +81,8 @@ public class ResumeUploadService {
 
         // 5. 保存简历到RustFS
         long storageStart = System.currentTimeMillis();
-        String fileKey = storageService.uploadResume(file);
+        long ownerUserId = currentUserService.getRequiredUserId();
+        String fileKey = storageService.uploadResume(file, ownerUserId);
         String fileUrl = storageService.getFileUrl(fileKey);
         log.info("简历已存储到RustFS: {} - 存储耗时: {}ms",
             fileKey, System.currentTimeMillis() - storageStart);
@@ -197,7 +200,8 @@ public class ResumeUploadService {
     }
 
     private ResumeReanalyzeSource loadReanalyzeSource(Long resumeId) {
-        ResumeEntity resume = resumeRepository.findById(resumeId)
+        ResumeEntity resume = resumeRepository.findByIdAndOwnerUserId(
+                resumeId, currentUserService.getRequiredUserId())
             .orElseThrow(() -> new BusinessException(ErrorCode.RESUME_NOT_FOUND, "简历不存在"));
         return new ResumeReanalyzeSource(
             resume.getOriginalFilename(),
@@ -211,7 +215,8 @@ public class ResumeUploadService {
         String resumeText,
         boolean shouldCacheResumeText
     ) {
-        ResumeEntity resume = resumeRepository.findById(resumeId)
+        ResumeEntity resume = resumeRepository.findByIdAndOwnerUserId(
+                resumeId, currentUserService.getRequiredUserId())
             .orElseThrow(() -> new BusinessException(ErrorCode.RESUME_NOT_FOUND, "简历不存在"));
 
         if (shouldCacheResumeText || !hasText(resume.getResumeText())) {

@@ -15,8 +15,10 @@ import interview.guide.modules.interview.service.InterviewSessionService;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -40,19 +42,31 @@ import java.util.Map;
 @RequiredArgsConstructor
 @Tag(name = "模拟面试", description = "面试会话创建、问答交互与报告生成")
 public class InterviewController {
-    
+
+    /** 列表接口单页硬上限（PERF-002）。 */
+    private static final int MAX_LIST_SIZE = 100;
+
     private final InterviewSessionService sessionService;
     private final InterviewHistoryService historyService;
     private final InterviewPersistenceService persistenceService;
     
     /**
      * 列出所有面试会话（用于面试记录页）
+     *
+     * <p>真正分页（PERF-002）：page 从 0 起，size 上限 100。
+     * 响应仍为 List 形状，后续如需翻页/总数应演进为 Page 契约并同步前端。</p>
      */
     @GetMapping("/api/interview/sessions")
-    public Result<List<SessionListItemDTO>> listSessions() {
-        List<SessionListItemDTO> items = persistenceService.findAll().stream()
+    public Result<List<SessionListItemDTO>> listSessions(
+        @RequestParam(defaultValue = "0") int page,
+        @RequestParam(defaultValue = "20") int size
+    ) {
+        int safePage = Math.max(0, page);
+        int safeSize = Math.max(1, Math.min(size, MAX_LIST_SIZE));
+        List<SessionListItemDTO> items = persistenceService
+            .findAll(PageRequest.of(safePage, safeSize))
             .map(SessionListItemDTO::from)
-            .toList();
+            .getContent();
         return Result.success(items);
     }
 

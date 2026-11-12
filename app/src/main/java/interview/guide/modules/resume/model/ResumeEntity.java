@@ -1,6 +1,7 @@
 package interview.guide.modules.resume.model;
 
 import interview.guide.common.model.AsyncTaskStatus;
+import interview.guide.modules.auth.model.UserEntity;
 import jakarta.persistence.*;
 
 import java.time.LocalDateTime;
@@ -11,16 +12,20 @@ import java.time.LocalDateTime;
  */
 @Entity
 @Table(name = "resumes", indexes = {
-    @Index(name = "idx_resume_hash", columnList = "fileHash", unique = true)
+    @Index(name = "uk_resume_owner_hash", columnList = "owner_user_id,fileHash", unique = true)
 })
 public class ResumeEntity {
     
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
+
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "owner_user_id", nullable = false)
+    private UserEntity ownerUser;
     
     // 文件内容的SHA-256哈希值，用于去重
-    @Column(nullable = false, unique = true, length = 64)
+    @Column(nullable = false, length = 64)
     private String fileHash;
     
     // 原始文件名
@@ -78,6 +83,14 @@ public class ResumeEntity {
     
     public void setId(Long id) {
         this.id = id;
+    }
+
+    public UserEntity getOwnerUser() {
+        return ownerUser;
+    }
+
+    public void setOwnerUser(UserEntity ownerUser) {
+        this.ownerUser = ownerUser;
     }
     
     public String getFileHash() {

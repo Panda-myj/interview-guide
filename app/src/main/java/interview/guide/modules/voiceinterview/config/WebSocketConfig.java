@@ -9,7 +9,6 @@ import org.springframework.web.socket.config.annotation.EnableWebSocket;
 import org.springframework.web.socket.config.annotation.WebSocketConfigurer;
 import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistry;
 import org.springframework.web.socket.server.standard.ServletServerContainerFactoryBean;
-import org.springframework.web.socket.server.support.HttpSessionHandshakeInterceptor;
 
 @Configuration
 @EnableWebSocket
@@ -18,12 +17,13 @@ public class WebSocketConfig implements WebSocketConfigurer {
 
     private final VoiceInterviewWebSocketHandler voiceInterviewWebSocketHandler;
     private final CorsProperties corsProperties;
+    private final VoiceInterviewHandshakeInterceptor handshakeInterceptor;
 
     //WebSocket 端点为 /ws/voice-interview/{sessionId}，前端通过 JavaScript new WebSocket("ws://localhost:8080/ws/voice-interview/123") 连接。
     @Override
     public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
         registry.addHandler(voiceInterviewWebSocketHandler, "/ws/voice-interview/{sessionId}")
-                .addInterceptors(new HttpSessionHandshakeInterceptor())
+                .addInterceptors(handshakeInterceptor)
                 .setAllowedOrigins(corsProperties.getAllowedOrigins().split(","));
     }
 

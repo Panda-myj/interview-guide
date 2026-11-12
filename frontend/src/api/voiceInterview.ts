@@ -1,4 +1,5 @@
 import { request } from './request';
+import { authApi } from './auth';
 
 // ========== 类型定义 ==========
 
@@ -223,9 +224,8 @@ export const voiceInterviewApi = {
   /**
    * Get all sessions
    */
-  async getAllSessions(userId?: string, status?: string): Promise<SessionMeta[]> {
+  async getAllSessions(status?: string): Promise<SessionMeta[]> {
     const params = new URLSearchParams();
-    if (userId) params.append('userId', userId);
     if (status) params.append('status', status);
 
     return request.get<SessionMeta[]>(
@@ -278,13 +278,17 @@ export function resolveVoiceInterviewWebSocketUrl(
 
 export class VoiceInterviewWebSocket {
   private ws: WebSocket | null = null;
+  private sessionId: number;
   private url: string;
   private handlers: WebSocketEventHandlers;
   private reconnectAttempts = 0;
-  private maxReconnectAttempts = 3;
-  private reconnectDelay = 2000;
+  private maxReconnectAttempts = 5;
+  private reconnectDelay = 1000;
+  private manuallyClosed = false;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(_sessionId: number, url: string, handlers: WebSocketEventHandlers) {
+  constructor(sessionId: number, url: string, handlers: WebSocketEventHandlers) {
+    this.sessionId = sessionId;
     this.url = url;
     this.handlers = handlers;
   }
@@ -293,7 +297,17 @@ export class VoiceInterviewWebSocket {
    * 建立 WebSocket 连接
    */
   connect(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.manuallyClosed = false;
+    void this.openWithTicket();
+  }
+
+  private async openWithTicket(): Promise<void> {
     try {
+      await authApi.createWsTicket(this.sessionId);
       this.ws = new WebSocket(this.url);
 
       this.ws.onopen = () => {
@@ -307,6 +321,11 @@ export class VoiceInterviewWebSocket {
 
           // 调用通用消息处理器
           this.handlers.onMessage?.(message);
+
+          // 服务端心跳：必须回 pong，否则会被租约看门狗判定连接死亡
+          if (message.type === 'control' && message.action === 'ping') {
+            this.sendControl('pong');
+          }
 
           // 根据消息类型调用特定处理器
           switch (message.type) {
@@ -350,10 +369,21 @@ export class VoiceInterviewWebSocket {
       this.ws.onclose = (event) => {
         this.handlers.onClose?.(event);
 
-        if (!event.wasClean && this.reconnectAttempts < this.maxReconnectAttempts) {
-          this.reconnectAttempts++;
-          setTimeout(() => this.connect(), this.reconnectDelay);
+        if (this.manuallyClosed || event.wasClean) {
+          return;
         }
+        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+          return;
+        }
+
+        // 指数退避 + 随机抖动，避免服务重启时所有客户端同时重连造成惊群
+        this.reconnectAttempts++;
+        const backoff = Math.min(15000, this.reconnectDelay * 2 ** (this.reconnectAttempts - 1));
+        const delay = backoff + Math.floor(Math.random() * 250);
+        if (this.reconnectTimer) {
+          clearTimeout(this.reconnectTimer);
+        }
+        this.reconnectTimer = setTimeout(() => this.connect(), delay);
       };
 
       this.ws.onerror = (error) => {
@@ -404,9 +434,13 @@ export class VoiceInterviewWebSocket {
    * 关闭连接
    */
   disconnect(): void {
+    this.manuallyClosed = true;
+    this.reconnectAttempts = this.maxReconnectAttempts;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     if (this.ws) {
-      // 不重连
-      this.reconnectAttempts = this.maxReconnectAttempts;
       this.ws.close(1000, 'User disconnected');
       this.ws = null;
     }

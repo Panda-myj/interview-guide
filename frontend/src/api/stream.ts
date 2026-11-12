@@ -1,4 +1,5 @@
-import { API_BASE_URL, getErrorMessage, getResultError, parseResultPayload } from './request';
+import { API_BASE_URL, getErrorMessage, getResultError, parseResultPayload, refreshAccessToken } from './request';
+import { getAccessToken } from '../auth/session';
 
 type SseParseMode = 'line' | 'event';
 
@@ -270,11 +271,30 @@ async function readStream(response: Response, options: StreamSseOptions): Promis
 
 export async function streamSse(options: StreamSseOptions): Promise<void> {
   try {
-    const response = await fetch(toApiUrl(options.url), options.init);
+    let response = await fetchWithAuth(options.url, options.init);
+    if (response.status === 401) {
+      const token = await refreshAccessToken(true);
+      if (token) {
+        response = await fetchWithAuth(options.url, options.init);
+      }
+    }
     await assertStreamResponse(response);
     await readStream(response, options);
     options.onComplete();
   } catch (error) {
     options.onError(new Error(getErrorMessage(error)));
   }
+}
+
+async function fetchWithAuth(url: string, init: RequestInit): Promise<Response> {
+  const headers = new Headers(init.headers);
+  const token = getAccessToken();
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+  return fetch(toApiUrl(url), {
+    ...init,
+    headers,
+    credentials: 'include',
+  });
 }

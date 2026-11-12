@@ -13,23 +13,17 @@ import {
   resolveVoiceInterviewWebSocketUrl,
   VoiceInterviewWebSocket,
 } from '../api/voiceInterview';
-
-type VoiceConfig = {
-  skillId: string;
-  difficulty?: string;
-  techEnabled: boolean;
-  projectEnabled: boolean;
-  hrEnabled: boolean;
-  plannedDuration: number;
-  resumeId?: number;
-  llmProvider?: string;
-};
+import { useToast } from '../components/Toast';
+import type { VoiceInterviewConfig, VoiceMessage } from '../types/voiceInterview';
+import { useVoicePhase } from '../hooks/useVoicePhase';
+import { ROUTES } from '../constants/routes';
 
 export default function VoiceInterviewPage() {
+  const toast = useToast();
   const navigate = useNavigate();
   const location = useLocation();
   const entryState = (location.state as {
-    voiceConfig?: VoiceConfig;
+    voiceConfig?: VoiceInterviewConfig;
     voiceSessionId?: number;
   } | null) || {};
   const resumeSessionId = entryState.voiceSessionId;
@@ -37,7 +31,7 @@ export default function VoiceInterviewPage() {
   const urlSkillId = queryParams.get('skillId') || undefined;
   const urlDifficulty = queryParams.get('difficulty') || undefined;
   const urlDuration = Number(queryParams.get('duration') || queryParams.get('plannedDuration'));
-  const queryVoiceConfig: VoiceConfig | undefined = urlSkillId
+  const queryVoiceConfig: VoiceInterviewConfig | undefined = urlSkillId
     ? {
         skillId: urlSkillId,
         difficulty: urlDifficulty,
@@ -52,12 +46,12 @@ export default function VoiceInterviewPage() {
 
   const [isRecording, setIsRecording] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
-  const [currentPhase, setCurrentPhase] = useState('INTRO');
+  const { label: currentPhaseLabel, phaseWarning, syncPhase } = useVoicePhase();
   const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
 
   const [userText, setUserText] = useState('');
   const [aiText, setAiText] = useState('');
-  const [messages, setMessages] = useState<{ role: 'user' | 'ai'; text: string; id: string }[]>([]);
+  const [messages, setMessages] = useState<VoiceMessage[]>([]);
   const [isAiSpeaking, setIsAiSpeaking] = useState(false);
   const [sessionId, setSessionId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -392,16 +386,6 @@ export default function VoiceInterviewPage() {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  const getPhaseLabel = (phase: string) => {
-    const phaseMap: Record<string, string> = {
-      INTRO: '自我介绍',
-      TECH: '技术问题',
-      PROJECT: '项目深挖',
-      HR: 'HR问题',
-    };
-    return phaseMap[phase] || phase;
-  };
-
   // 手动提交回答：ASR 只负责生成可编辑文本，不自动触发 LLM
   const handleSubmitAnswer = useCallback(() => {
     if (!wsRef.current || !wsRef.current.isConnected()) {
@@ -528,6 +512,20 @@ export default function VoiceInterviewPage() {
         }
         return;
       }
+      if (action === 'asr_unavailable') {
+        // 服务端自动重连已耗尽：停止发音频，提示改用下方文字输入，避免继续产生失败与计费
+        setIsAsrReady(false);
+        setIsRecording(false);
+        setError(message?.trim() || '语音识别暂不可用，请在下方输入文字继续回答');
+        return;
+      }
+      if (action === 'duplicate_connection') {
+        // 同一会话被其它连接占用：服务端随后关闭连接，这里不再自动重连
+        setIsAsrReady(false);
+        setConnectionStatus('disconnected');
+        setError(message?.trim() || '该会话已在其他窗口打开，请关闭其它页面后刷新重试');
+        return;
+      }
       if (action === 'tts_unavailable') {
         clearPendingAiTextCommit();
         aiAudioPendingRef.current = false;
@@ -612,7 +610,7 @@ export default function VoiceInterviewPage() {
       });
 
       setSessionId(session.sessionId);
-      setCurrentPhase(session.currentPhase);
+      syncPhase(session.currentPhase);
 
       const wsUrl = resolveVoiceInterviewWebSocketUrl(session.sessionId, session.webSocketUrl);
       connectWithHandlers(session.sessionId, wsUrl);
@@ -621,7 +619,7 @@ export default function VoiceInterviewPage() {
       setError(errorMessage);
       setConnectionStatus('disconnected');
       setIsAsrReady(false);
-      alert('创建会话失败：' + errorMessage);
+      toast.error('创建会话失败：' + errorMessage);
     }
   }, [connectWithHandlers]);
 
@@ -636,14 +634,14 @@ export default function VoiceInterviewPage() {
         voiceInterviewApi.getMessages(id),
       ]);
       setSessionId(session.sessionId);
-      setCurrentPhase(session.currentPhase);
+      syncPhase(session.currentPhase);
 
       if (session.startTime) {
         const elapsedSec = Math.floor((Date.now() - new Date(session.startTime).getTime()) / 1000);
         setCurrentTime(elapsedSec > 0 ? elapsedSec : 0);
       }
 
-      const restored: { role: 'user' | 'ai'; text: string; id: string }[] = [];
+      const restored: VoiceMessage[] = [];
       let pendingAi: { text: string; id: string } | null = null;
       for (const msg of history) {
         const aiText = msg.aiGeneratedText?.trim();
@@ -749,9 +747,9 @@ export default function VoiceInterviewPage() {
     if (!sessionId) return;
     try {
       await voiceInterviewApi.pauseSession(sessionId);
-      navigate('/interviews');
+      navigate(ROUTES.interviewHistory);
     } catch (error) {
-      alert('暂停失败，请重试');
+      toast.error('暂停失败，请重试');
     }
   };
 
@@ -770,11 +768,11 @@ export default function VoiceInterviewPage() {
         console.error('Failed to end session:', error);
       }
     }
-    navigate('/interviews');
+    navigate(ROUTES.interviewHistory);
   };
 
   const handleCloseModal = () => {
-    navigate('/history');
+    navigate(ROUTES.resumeHistory);
   };
 
   // 提交按钮是否可用
@@ -839,13 +837,24 @@ export default function VoiceInterviewPage() {
           </div>
         )}
 
+        {/* 服务端阶段非法时不静默：保留上一个合法阶段并提示用户 */}
+        {phaseWarning && (
+          <div
+            role="status"
+            className="mb-6 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-300 px-4 py-3 rounded-xl flex items-center gap-2"
+          >
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span className="text-sm">{phaseWarning}</span>
+          </div>
+        )}
+
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
           <div className="xl:col-span-2 space-y-6">
             <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-100 dark:border-slate-700 shadow-sm p-6">
               <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
                 <div className="flex items-center gap-3">
                   <button
-                    onClick={() => navigate('/interviews')}
+                    onClick={() => navigate(ROUTES.interviewHistory)}
                     className="w-9 h-9 rounded-lg bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors flex items-center justify-center"
                     title="返回面试记录"
                   >
@@ -855,7 +864,7 @@ export default function VoiceInterviewPage() {
                     <h2 className="text-lg font-semibold text-slate-900 dark:text-white">{templateName || effectiveSkillId}</h2>
                     <div className="flex items-center gap-2 mt-1">
                       <span className="text-xs px-2 py-0.5 bg-primary-100 dark:bg-primary-900/40 text-primary-600 dark:text-primary-300 rounded-full">
-                        {getPhaseLabel(currentPhase)}
+                        {currentPhaseLabel}
                       </span>
                       <span className="text-xs text-slate-500 dark:text-slate-400">
                         {connectionStatus === 'connected'

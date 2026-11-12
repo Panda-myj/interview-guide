@@ -1,6 +1,7 @@
 package interview.guide.modules.voiceinterview.model;
 
 import interview.guide.common.model.AsyncTaskStatus;
+import interview.guide.modules.auth.model.UserEntity;
 import jakarta.persistence.*;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -9,6 +10,9 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.LocalDateTime;
+import java.util.EnumSet;
+import java.util.Map;
+import java.util.Set;
 
 @Entity
 @Table(name = "voice_interview_sessions")
@@ -22,8 +26,9 @@ public class VoiceInterviewSessionEntity {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(name = "user_id")
-    private String userId;
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "owner_user_id", nullable = false)
+    private UserEntity ownerUser;
 
     @Column(name = "role_type", nullable = false)
     private String roleType;
@@ -102,6 +107,57 @@ public class VoiceInterviewSessionEntity {
 
     @Column(name = "evaluate_error", length = 500)
     private String evaluateError;
+
+    @Column(name = "evaluate_attempt")
+    @Builder.Default
+    private Integer evaluateAttempt = 0;
+
+    /**
+     * 语音面试会话状态迁移表：key 为当前状态，value 为允许迁移到的目标状态。
+     * 同状态迁移视为幂等空操作（例如 WebSocket 重连重复结束会话）。
+     */
+    private static final Map<VoiceInterviewSessionStatus, Set<VoiceInterviewSessionStatus>>
+        ALLOWED_STATUS_TRANSITIONS = Map.of(
+            VoiceInterviewSessionStatus.IN_PROGRESS, EnumSet.of(
+                VoiceInterviewSessionStatus.IN_PROGRESS,
+                VoiceInterviewSessionStatus.PAUSED,
+                VoiceInterviewSessionStatus.COMPLETED,
+                VoiceInterviewSessionStatus.FAILED),
+            VoiceInterviewSessionStatus.PAUSED, EnumSet.of(
+                VoiceInterviewSessionStatus.PAUSED,
+                VoiceInterviewSessionStatus.IN_PROGRESS,
+                VoiceInterviewSessionStatus.COMPLETED,
+                VoiceInterviewSessionStatus.FAILED),
+            VoiceInterviewSessionStatus.COMPLETED, EnumSet.of(VoiceInterviewSessionStatus.COMPLETED),
+            VoiceInterviewSessionStatus.FAILED, EnumSet.of(VoiceInterviewSessionStatus.FAILED)
+        );
+
+    /**
+     * 判断会话状态迁移是否合法。
+     *
+     * @param from 当前状态，null 表示尚未初始化
+     * @param to   目标状态
+     */
+    public static boolean canTransition(VoiceInterviewSessionStatus from,
+                                        VoiceInterviewSessionStatus to) {
+        if (to == null) {
+            return false;
+        }
+        if (from == null) {
+            return to == VoiceInterviewSessionStatus.IN_PROGRESS;
+        }
+        return ALLOWED_STATUS_TRANSITIONS.getOrDefault(from, Set.of()).contains(to);
+    }
+
+    /**
+     * 返回指定状态允许迁移到的目标状态集合。
+     */
+    public static Set<VoiceInterviewSessionStatus> allowedTargets(VoiceInterviewSessionStatus from) {
+        if (from == null) {
+            return EnumSet.of(VoiceInterviewSessionStatus.IN_PROGRESS);
+        }
+        return ALLOWED_STATUS_TRANSITIONS.getOrDefault(from, Set.of());
+    }
 
     @PreUpdate
     protected void onUpdate() {

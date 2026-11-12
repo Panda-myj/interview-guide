@@ -1,11 +1,50 @@
 import { useState, lazy, Suspense } from 'react';
-import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import oneDark from 'react-syntax-highlighter/dist/esm/styles/prism/one-dark';
 import { Check, Copy } from 'lucide-react';
+import type { SyntaxHighlighterProps } from 'react-syntax-highlighter';
 
-// Lazy load SyntaxHighlighter
-const SyntaxHighlighter = lazy(() =>
-  import('react-syntax-highlighter/dist/esm/prism').then(module => ({ default: module.default }))
-);
+/**
+ * 按需加载 Prism 高亮器与其语言包。
+ * 使用 prism-light 而不是完整 prism 构建，避免把全部语言打包进产物体积（FEDGE-002）。
+ */
+const SyntaxHighlighter = lazy(async () => {
+  const [highlighterModule, java, python, javascript, typescript, sql, bash, json, xml, yaml, go, cpp] =
+    await Promise.all([
+      import('react-syntax-highlighter/dist/esm/prism-light'),
+      import('react-syntax-highlighter/dist/esm/languages/prism/java'),
+      import('react-syntax-highlighter/dist/esm/languages/prism/python'),
+      import('react-syntax-highlighter/dist/esm/languages/prism/javascript'),
+      import('react-syntax-highlighter/dist/esm/languages/prism/typescript'),
+      import('react-syntax-highlighter/dist/esm/languages/prism/sql'),
+      import('react-syntax-highlighter/dist/esm/languages/prism/bash'),
+      import('react-syntax-highlighter/dist/esm/languages/prism/json'),
+      import('react-syntax-highlighter/dist/esm/languages/prism/markup'),
+      import('react-syntax-highlighter/dist/esm/languages/prism/yaml'),
+      import('react-syntax-highlighter/dist/esm/languages/prism/go'),
+      import('react-syntax-highlighter/dist/esm/languages/prism/cpp'),
+    ]);
+
+  const instance = highlighterModule.default;
+  instance.registerLanguage('java', java.default);
+  instance.registerLanguage('python', python.default);
+  instance.registerLanguage('javascript', javascript.default);
+  instance.registerLanguage('js', javascript.default);
+  instance.registerLanguage('typescript', typescript.default);
+  instance.registerLanguage('ts', typescript.default);
+  instance.registerLanguage('sql', sql.default);
+  instance.registerLanguage('bash', bash.default);
+  instance.registerLanguage('shell', bash.default);
+  instance.registerLanguage('json', json.default);
+  instance.registerLanguage('xml', xml.default);
+  instance.registerLanguage('html', xml.default);
+  instance.registerLanguage('yaml', yaml.default);
+  instance.registerLanguage('yml', yaml.default);
+  instance.registerLanguage('go', go.default);
+  instance.registerLanguage('cpp', cpp.default);
+  instance.registerLanguage('c', cpp.default);
+
+  return { default: instance as unknown as React.ComponentType<SyntaxHighlighterProps> };
+});
 
 interface CodeBlockProps {
   language?: string;

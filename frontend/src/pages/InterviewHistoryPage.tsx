@@ -26,6 +26,8 @@ import {
   TrendingUp,
   Users,
 } from 'lucide-react';
+import { useToast } from '../components/Toast';
+import { ROUTES, path } from '../constants/routes';
 
 type InterviewType = 'all' | 'text' | 'voice';
 
@@ -168,6 +170,7 @@ function itemsEqual(a: UnifiedInterviewItem[], b: UnifiedInterviewItem[]): boole
 }
 
 export default function InterviewHistoryPage({ onBack: _onBack, onViewInterview, onRestartInterview, onContinueInterview }: InterviewHistoryPageProps) {
+  const toast = useToast();
   const navigate = useNavigate();
   const [items, setItems] = useState<UnifiedInterviewItem[]>([]);
   const [stats, setStats] = useState<InterviewStats | null>(null);
@@ -304,9 +307,9 @@ export default function InterviewHistoryPage({ onBack: _onBack, onViewInterview,
     } else if (item.voiceSessionId) {
       const isLive = isLiveStatus(item.status);
       if (isLive) {
-        navigate('/voice-interview', { state: { voiceSessionId: item.voiceSessionId } });
+        navigate(ROUTES.voiceInterview, { state: { voiceSessionId: item.voiceSessionId } });
       } else {
-        navigate(`/voice-interview/${item.voiceSessionId}/evaluation`);
+        navigate(path.voiceEvaluation(item.voiceSessionId));
       }
     }
   };
@@ -328,7 +331,7 @@ export default function InterviewHistoryPage({ onBack: _onBack, onViewInterview,
       await loadAll();
       setDeleteItem(null);
     } catch (err) {
-      alert(err instanceof Error ? err.message : '删除失败，请稍后重试');
+      toast.error(err instanceof Error ? err.message : '删除失败，请稍后重试');
     } finally {
       setDeletingSessionId(null);
     }
@@ -348,7 +351,7 @@ export default function InterviewHistoryPage({ onBack: _onBack, onViewInterview,
       document.body.removeChild(a);
       window.URL.revokeObjectURL(url);
     } catch {
-      alert('导出失败，请重试');
+      toast.error('导出失败，请重试');
     } finally {
       setExporting(null);
     }
@@ -553,7 +556,7 @@ export default function InterviewHistoryPage({ onBack: _onBack, onViewInterview,
                         )}
                         {item.type === 'voice' && isLiveStatus(item.status) && item.voiceSessionId && (
                           <button
-                            onClick={(e) => { e.stopPropagation(); navigate('/voice-interview', { state: { voiceSessionId: item.voiceSessionId } }); }}
+                            onClick={(e) => { e.stopPropagation(); navigate(ROUTES.voiceInterview, { state: { voiceSessionId: item.voiceSessionId } }); }}
                             className="p-2 text-slate-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/30 rounded-lg transition-colors"
                             title="继续面试"
                           >

@@ -7,6 +7,7 @@ import DeleteConfirmDialog from '../components/DeleteConfirmDialog';
 import {formatDateOnly} from '../utils/date';
 import {getScoreProgressColor} from '../utils/score';
 import { ROUTES } from '../constants/routes';
+import { useToast } from '../components/Toast';
 
 interface HistoryListProps {
   onSelectResume: (id: number) => void;
@@ -42,6 +43,7 @@ function resumesEqual(a: ResumeListItem[], b: ResumeListItem[]): boolean {
 }
 
 export default function HistoryList({onSelectResume}: HistoryListProps) {
+  const toast = useToast();
   const navigate = useNavigate();
   const [resumes, setResumes] = useState<ResumeListItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -92,7 +94,7 @@ export default function HistoryList({onSelectResume}: HistoryListProps) {
       await loadResumes();
       setDeleteConfirm(null);
     } catch (err) {
-      alert(err instanceof Error ? err.message : '删除失败，请稍后重试');
+      toast.error(err instanceof Error ? err.message : '删除失败，请稍后重试');
     } finally {
       setDeletingId(null);
     }
@@ -126,7 +128,7 @@ export default function HistoryList({onSelectResume}: HistoryListProps) {
             上传简历
           </button>
           <button
-            onClick={() => navigate('/interview-hub')}
+            onClick={() => navigate(ROUTES.interviewHub)}
             className="flex items-center gap-2 px-4 py-2 bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"
           >
             <Sparkles className="w-4 h-4" />

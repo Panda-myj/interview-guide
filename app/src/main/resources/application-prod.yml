@@ -13,11 +13,16 @@ server:
   # 部署在 Nginx 等反向代理后，读取 X-Forwarded-* 头以还原真实协议 / IP
   forward-headers-strategy: framework
 
+springdoc:
+  api-docs:
+    enabled: ${SPRINGDOC_API_DOCS_ENABLED:false}
+  swagger-ui:
+    enabled: ${SPRINGDOC_SWAGGER_UI_ENABLED:false}
+
 spring:
   jpa:
     hibernate:
-      # 生产不自动改表结构，schema 由运维或迁移脚本管理，应用只做校验。
-      # 首次部署空库时：临时设置 JPA_DDL_AUTO=update 建表，完成后务必改回 validate。
+      # 生产不自动改表结构，业务表由 Flyway 迁移脚本管理，应用只做校验。
       ddl-auto: ${JPA_DDL_AUTO:validate}
     show-sql: false
     properties:
@@ -32,15 +37,29 @@ spring:
         initialize-schema: ${PGVECTOR_INIT_SCHEMA:false}
 
 app:
+  auth:
+    secure-cookies: true
+    sms:
+      expose-debug-code: false
+  # 生产对象存储：不提供开发默认凭据，缺失时由 ProductionConfigurationValidator 快速失败
+  storage:
+    endpoint: ${APP_STORAGE_ENDPOINT:}
+    access-key: ${APP_STORAGE_ACCESS_KEY:}
+    secret-key: ${APP_STORAGE_SECRET_KEY:}
+    bucket: ${APP_STORAGE_BUCKET:}
+    # 生产禁止启动时自动建 bucket，避免权限放大
+    auto-create-bucket: false
   # 生产 CORS 白名单：请改成真实访问域名，多个用英文逗号分隔。
-  # 默认覆盖本地容器化部署入口（http://localhost），避免误放行开发端口 5173/5174。
+  # 生产必须通过环境变量配置真实访问域名；不设默认值，避免误放行开发入口。
   cors:
-    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost,http://127.0.0.1}
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:}
   ai:
     security:
       # 生产必须提供加密密钥，且禁止回退到内置默认密钥
       require-encryption-key: true
       allow-fallback-encryption-key: false
+      # 生产禁止 Provider 访问回环/内网/云元数据地址（防 SSRF），不要开启
+      allow-local-endpoints: false
 
 # 生产日志：输出到文件并滚动，避免仅依赖标准输出
 logging:
@@ -60,7 +79,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: ${ACTUATOR_ENDPOINTS:health,info}
+        include: ${ACTUATOR_ENDPOINTS:health}
   endpoint:
     health:
       show-details: never

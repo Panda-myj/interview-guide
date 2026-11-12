@@ -1,0 +1,42 @@
+# 性能指标快照（空闲基线）
+时间: 2026-11-05T18:41:47+08:00
+
+## 应用
+{"groups":["liveness","readiness"],"status":"UP"}
+
+## PostgreSQL（pg_stat_user_tables）
+             relname             | n_live_tup | seq_scan | idx_scan 
+---------------------------------+------------+----------+----------
+ voice_interview_messages        |         34 |      894 |        2
+ voice_interview_sessions        |         32 |     1212 |      169
+ interview_answers               |         24 |        8 |       44
+ voice_interview_evaluations     |         22 |        2 |       26
+ login_notifications             |          7 |        7 |      110
+ auth_sessions                   |          7 |        8 |       29
+ user_devices                    |          7 |        3 |       28
+ flyway_schema_history           |          5 |       20 |        0
+ llm_provider_config             |          3 |       50 |       35
+ users                           |          3 |       13 |      340
+ interview_sessions              |          3 |      256 |      241
+ llm_global_setting              |          1 |        1 |      148
+ resumes                         |          1 |      185 |       17
+ knowledge_bases                 |          1 |      131 |       42
+ resume_analyses                 |          1 |      148 |        0
+ rag_chat_sessions               |          0 |       23 |        7
+ interview_schedule              |          0 |       52 |        9
+ resource_deletion_compensations |          0 |        5 |       44
+ rag_session_knowledge_bases     |          0 |        3 |        0
+ vector_store                    |          0 |        8 |        0
+(20 rows)
+
+## Redis
+instantaneous_ops_per_sec:6
+keyspace_hits:12514
+keyspace_misses:179
+3
+
+## 容器资源
+NAME                 CPU %     MEM USAGE / LIMIT
+interview-postgres   0.00%     49.86MiB / 3.825GiB
+interview-redis      0.27%     3.891MiB / 3.825GiB
+interview-rustfs     0.03%     67.21MiB / 3.825GiB

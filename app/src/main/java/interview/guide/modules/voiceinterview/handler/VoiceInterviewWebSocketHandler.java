@@ -12,6 +12,10 @@ import interview.guide.modules.voiceinterview.service.QwenAsrService;
 import interview.guide.modules.voiceinterview.service.QwenTtsService;
 import interview.guide.modules.voiceinterview.service.DashscopeLlmService;
 import interview.guide.modules.voiceinterview.service.VoiceInterviewService;
+import interview.guide.modules.voiceinterview.service.VoiceSessionAuditLogger;
+import interview.guide.modules.voiceinterview.service.VoiceSessionFinalizer;
+import interview.guide.modules.voiceinterview.service.VoiceSessionLeaseService;
+import interview.guide.modules.voiceinterview.service.VoiceSessionLeaseService.LeaseAttempt;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -23,6 +27,7 @@ import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.ConcurrentWebSocketSessionDecorator;
+import org.springframework.web.socket.handler.SessionLimitExceededException;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 import java.util.ArrayList;
@@ -30,6 +35,7 @@ import java.util.Base64;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -61,6 +67,9 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
     private final QwenTtsService ttsService;
     private final DashscopeLlmService llmService;
     private final VoiceInterviewService interviewService;
+    private final VoiceSessionLeaseService leaseService;
+    private final VoiceSessionFinalizer sessionFinalizer;
+    private final VoiceSessionAuditLogger auditLogger;
     private final VoiceInterviewProperties voiceInterviewProperties;
     private final ObjectProvider<MeterRegistry> meterRegistryProvider;
 
@@ -142,6 +151,23 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
     @Override
     public void afterConnectionEstablished(WebSocketSession session) throws Exception {
         String sessionId = extractSessionId(session);
+        if (sessionId == null || sessionId.isBlank()) {
+            log.warn("Reject WebSocket connection without session id: {}", session.getUri());
+            session.close(CloseStatus.BAD_DATA);
+            return;
+        }
+
+        String connectionId = UUID.randomUUID().toString();
+        LeaseAttempt leaseAttempt = leaseService.acquire(sessionId, connectionId);
+        if (leaseAttempt.rejected()) {
+            String holder = leaseAttempt.lease() == null ? "-" : leaseAttempt.lease().connectionId();
+            auditLogger.record(sessionId, VoiceSessionAuditLogger.Event.CONNECTION_REJECTED_DUPLICATE,
+                connectionId, "holder=" + holder);
+            sendControl(session, "duplicate_connection", "该会话已有进行中的连接，请关闭其它页面后重试");
+            session.close(CloseStatus.POLICY_VIOLATION);
+            return;
+        }
+        long fencingToken = leaseAttempt.lease() == null ? 1L : leaseAttempt.lease().fencingToken();
 
         // Increase message size limits for audio streaming
         // 1 second of PCM audio @ 16kHz, 16-bit = ~32KB raw, ~42KB base64
@@ -154,9 +180,17 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
         );
 
         sessions.put(sessionId, safeSession);
-        sessionStates.put(sessionId, new SessionState());
+        sessionStates.put(sessionId, new SessionState(connectionId, fencingToken));
         lastActivityTime.put(sessionId, System.currentTimeMillis());
-        log.info("WebSocket connection established for session: {}", sessionId);
+        log.info("WebSocket connection established for session: {}, connectionId: {}", sessionId, connectionId);
+
+        auditLogger.record(sessionId, VoiceSessionAuditLogger.Event.LEASE_ACQUIRED, connectionId,
+            "fencingToken=" + fencingToken);
+        if (leaseAttempt.degraded()) {
+            auditLogger.record(sessionId, VoiceSessionAuditLogger.Event.LEASE_DEGRADED, connectionId,
+                "redis_unavailable");
+        }
+        auditLogger.record(sessionId, VoiceSessionAuditLogger.Event.SESSION_CONNECTED, connectionId, "ok");
 
         try {
             startDashScopeStt(sessionId, safeSession);
@@ -203,9 +237,34 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
             } else {
                 log.warn("Session is closed, cannot send message");
             }
+        } catch (SessionLimitExceededException e) {
+            // 慢客户端：发送缓冲超限。必须主动断开，否则后续帧会持续阻塞管线
+            log.warn("WebSocket send buffer exceeded, closing slow client: {}", e.getMessage());
+            handleSlowClient(session);
         } catch (Exception e) {
             log.error("Error sending message to session", e);
         }
+    }
+
+    /**
+     * 慢客户端处理：记录审计并异步关闭连接，避免在读线程里做阻塞关闭。
+     */
+    private void handleSlowClient(WebSocketSession session) {
+        String sessionId = extractSessionId(session);
+        SessionState state = sessionId == null ? null : sessionStates.get(sessionId);
+        if (sessionId != null) {
+            auditLogger.record(sessionId, VoiceSessionAuditLogger.Event.SLOW_CLIENT_DISCONNECT,
+                state == null ? null : state.getConnectionId(), "send_buffer_overflow");
+        }
+        voicePipelineExecutor.execute(() -> {
+            try {
+                if (session.isOpen()) {
+                    session.close(CloseStatus.SESSION_NOT_RELIABLE);
+                }
+            } catch (Exception closeError) {
+                log.warn("Failed to close slow client connection: {}", closeError.getMessage());
+            }
+        });
     }
 
     private void triggerOpeningQuestionIfNeeded(String sessionId, WebSocketSession session) {
@@ -245,7 +304,7 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
                 if (wavAudio.length > 0 && session.isOpen()) {
                     sendAudio(session, wavAudio, aiReply);
                 } else if (session.isOpen()) {
-                    sendTtsUnavailable(session, ttsService.getLastError());
+                    sendTtsUnavailable(sessionId, session, ttsService.getLastError());
                 }
 
                 log.info("Opening question sent for session {}", sessionId);
@@ -304,56 +363,92 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
     @Override
     protected void handleTextMessage(WebSocketSession session, TextMessage message) throws Exception {
         String sessionId = extractSessionId(session);
+        SessionState state = sessionId == null ? null : sessionStates.get(sessionId);
+        if (state == null) {
+            log.warn("Discard message from unknown or closed session: {}", sessionId);
+            return;
+        }
 
+        // 任何入站帧都作为心跳凭据（兼容旧客户端不发 pong 的情况）
+        state.markInbound();
+        lastActivityTime.put(sessionId, System.currentTimeMillis());
+
+        JsonNode msg;
         try {
-            JsonNode msg = objectMapper.readTree(message.getPayload());
-            String type = msg.get("type").asText();
-            int messageSize = message.getPayload().length();
-            int messageSizeKB = messageSize / 1024;
-            if ("audio".equals(type)) {
-                log.trace("[WebSocket] Received audio: sessionId={}, size={}KB", sessionId, messageSizeKB);
-            } else {
-                log.info("[WebSocket] Received message: sessionId={}, type={}, size={}KB ({} bytes)",
-                    sessionId, type, messageSizeKB, messageSize);
-            }
-
-            if (messageSizeKB > 200) {
-                log.warn("[WebSocket] Large message detected: {}KB", messageSizeKB);
-            }
-
-            // Update last activity time for pause timeout detection
-            // 更新最后活动时间（用于暂停超时检测）
-            lastActivityTime.put(sessionId, System.currentTimeMillis());
-
-            switch (type) {
-                case "audio":
-                    String audioData = msg.has("data") ? msg.get("data").asText() : null;
-                    if (audioData != null && !audioData.isEmpty()) {
-                        handleUserAudio(sessionId, audioData);
-                    } else {
-                        log.warn("Received audio message without data");
-                    }
-                    break;
-                case "control":
-                    try {
-                        handleControl(sessionId, objectMapper.treeToValue(msg, WebSocketControlMessage.class));
-                    } catch (Exception e) {
-                        log.error("Error handling control message for session {}", sessionId, e);
-                        sendError(session, "控制消息处理失败: " + e.getMessage());
-                    }
-                    break;
-                default:
-                    log.warn("Unknown message type: {} for session {}", type, sessionId);
-            }
-
+            msg = objectMapper.readTree(message.getPayload());
         } catch (Exception e) {
-            log.error("Error handling message for session {}", sessionId, e);
-            sendError(session, "消息处理失败: " + e.getMessage());
+            registerProtocolViolation(sessionId, session, state, "malformed_json");
+            return;
+        }
+        if (msg == null || !msg.hasNonNull("type") || !msg.get("type").isTextual()) {
+            registerProtocolViolation(sessionId, session, state, "missing_type");
+            return;
+        }
+
+        String type = msg.get("type").asText();
+        int messageSize = message.getPayload().length();
+        int messageSizeKB = messageSize / 1024;
+        if ("audio".equals(type)) {
+            log.trace("[WebSocket] Received audio: sessionId={}, size={}KB", sessionId, messageSizeKB);
+        } else {
+            log.info("[WebSocket] Received message: sessionId={}, type={}, size={}KB ({} bytes)",
+                sessionId, type, messageSizeKB, messageSize);
+        }
+        if (messageSizeKB > 200) {
+            log.warn("[WebSocket] Large message detected: {}KB", messageSizeKB);
+        }
+
+        switch (type) {
+            case "audio":
+                String audioData = msg.has("data") ? msg.get("data").asText() : null;
+                if (audioData != null && !audioData.isEmpty()) {
+                    handleUserAudio(sessionId, audioData);
+                } else {
+                    registerProtocolViolation(sessionId, session, state, "audio_without_data");
+                }
+                break;
+            case "control":
+                WebSocketControlMessage control;
+                try {
+                    control = objectMapper.treeToValue(msg, WebSocketControlMessage.class);
+                } catch (Exception e) {
+                    registerProtocolViolation(sessionId, session, state, "invalid_control_payload");
+                    return;
+                }
+                if (control != null && "pong".equals(control.getAction())) {
+                    // 心跳应答：markInbound 已在入口完成，这里不再触发业务逻辑
+                    return;
+                }
+                try {
+                    handleControl(sessionId, control);
+                } catch (Exception e) {
+                    log.error("Error handling control message for session {}", sessionId, e);
+                    sendError(session, "控制消息处理失败: " + e.getMessage());
+                }
+                break;
+            default:
+                registerProtocolViolation(sessionId, session, state, "unknown_type=" + type);
         }
     }
 
     @Override
     public void destroy() {
+        // 优雅停机：释放租约但不在关闭流程里做数据库收尾，
+        // 未完成会话由重启后的孤儿对账任务（VoiceSessionReconciler）最终化
+        sessionStates.forEach((sessionId, state) -> {
+            try {
+                auditLogger.record(sessionId, VoiceSessionAuditLogger.Event.SERVICE_SHUTDOWN,
+                    state.getConnectionId(), "graceful_shutdown");
+                leaseService.release(sessionId, state.getConnectionId(), state.getFencingToken());
+            } catch (RuntimeException e) {
+                log.warn("Failed to release voice session lease on shutdown: sessionId={}, error={}",
+                    sessionId, e.getMessage());
+            }
+        });
+        sessionStates.clear();
+        sessions.clear();
+        lastActivityTime.clear();
+
         voicePipelineExecutor.shutdownNow();
         utteranceMergeScheduler.shutdownNow();
         try {
@@ -368,30 +463,117 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) throws Exception {
         String sessionId = extractSessionId(session);
-        try {
-            sessions.remove(sessionId);
-            SessionState removedState = sessionStates.remove(sessionId);
-            if (removedState != null) {
-                Thread t = removedState.getProcessingThread();
-                if (t != null) {
-                    t.interrupt();
-                }
-            }
-            lastActivityTime.remove(sessionId);
-
-            // Stop STT transcription
-            sttService.stopTranscription(sessionId);
-            log.info("WebSocket connection closed for session: {}, status: {}", sessionId, status);
-
-            // WebSocket 异常断开时自动结束会话，防止状态永远停留在 IN_PROGRESS
-            try {
-                interviewService.endSessionIfInProgress(sessionId);
-            } catch (Exception endEx) {
-                log.warn("Failed to auto-end session {} after disconnect: {}", sessionId, endEx.getMessage());
-            }
-        } catch (Exception e) {
-            log.error("Error cleaning up session {} after close", sessionId, e);
+        if (sessionId == null) {
+            return;
         }
+
+        SessionState removedState = sessionStates.remove(sessionId);
+        sessions.remove(sessionId);
+        lastActivityTime.remove(sessionId);
+
+        if (removedState == null) {
+            log.debug("Close callback for untracked voice session: {}, status: {}", sessionId, status);
+            return;
+        }
+
+        Thread processingThread = removedState.getProcessingThread();
+        if (processingThread != null) {
+            processingThread.interrupt();
+        }
+
+        boolean stillHolder = leaseService.isLeaseHolder(
+            sessionId, removedState.getConnectionId(), removedState.getFencingToken());
+        if (!stillHolder) {
+            // 已被新连接接管的旧连接：既不能停 ASR 也不能收尾，否则会打断新连接正在进行的会话
+            auditLogger.record(sessionId, VoiceSessionAuditLogger.Event.CONNECTION_CLOSED_STALE,
+                removedState.getConnectionId(), "status=" + status.getCode());
+            log.info("Stale voice connection closed, session is owned by a newer connection: sessionId={}",
+                sessionId);
+            return;
+        }
+
+        sttService.stopTranscription(sessionId);
+        leaseService.release(sessionId, removedState.getConnectionId(), removedState.getFencingToken());
+        log.info("WebSocket connection closed for session: {}, status: {}", sessionId, status);
+        // 统一走收尾器：条件更新 + 评估入队幂等，重复触发不会产生重复报告
+        sessionFinalizer.finalizeSession(sessionId, "websocket_closed", removedState.getConnectionId());
+    }
+
+    /**
+     * 心跳与租约检查：续期失败或长时间无入站帧时主动断开，并交给收尾器完成最终化。
+     */
+    @Scheduled(fixedDelayString = "${app.voice-interview.lifecycle.heartbeat-check-interval-ms:10000}")
+    public void heartbeatTick() {
+        long now = System.currentTimeMillis();
+        long intervalMs = Math.max(1, voiceInterviewProperties.getLifecycle().getHeartbeatIntervalSeconds()) * 1000L;
+        long timeoutMs = Math.max(1, voiceInterviewProperties.getLifecycle().getHeartbeatTimeoutSeconds()) * 1000L;
+
+        sessionStates.forEach((sessionId, state) -> {
+            try {
+                boolean renewed = leaseService.renew(
+                    sessionId, state.getConnectionId(), state.getFencingToken());
+                if (!renewed) {
+                    auditLogger.record(sessionId, VoiceSessionAuditLogger.Event.LEASE_LOST,
+                        state.getConnectionId(), "renew_rejected");
+                    log.warn("Voice session lease lost, terminating connection: sessionId={}", sessionId);
+                    terminateSession(sessionId, state, "lease_lost");
+                    return;
+                }
+
+                long idleMs = now - state.getLastInboundAt();
+                if (idleMs > timeoutMs) {
+                    auditLogger.record(sessionId, VoiceSessionAuditLogger.Event.HEARTBEAT_TIMEOUT,
+                        state.getConnectionId(), "idleMs=" + idleMs);
+                    log.warn("Voice session heartbeat timed out after {}ms: sessionId={}", idleMs, sessionId);
+                    terminateSession(sessionId, state, "heartbeat_timeout");
+                    return;
+                }
+
+                if (now - state.getLastHeartbeatPingAt() >= intervalMs) {
+                    state.setLastHeartbeatPingAt(now);
+                    WebSocketSession session = sessions.get(sessionId);
+                    if (session != null) {
+                        sendControl(session, "ping", null);
+                    }
+                }
+            } catch (RuntimeException e) {
+                log.error("Heartbeat tick failed for voice session: {}", sessionId, e);
+            }
+        });
+    }
+
+    /**
+     * 主动断开并收尾。幂等：先移除内存状态，容器随后触发的 close 回调会因 state 缺失而直接返回。
+     */
+    private void terminateSession(String sessionId, SessionState state, String reason) {
+        WebSocketSession session = sessions.remove(sessionId);
+        sessionStates.remove(sessionId);
+        lastActivityTime.remove(sessionId);
+
+        if (session != null && session.isOpen()) {
+            try {
+                session.close(CloseStatus.SESSION_NOT_RELIABLE);
+            } catch (Exception e) {
+                log.warn("Failed to close voice session {}: {}", sessionId, e.getMessage());
+            }
+        }
+        sttService.stopTranscription(sessionId);
+        leaseService.release(sessionId, state.getConnectionId(), state.getFencingToken());
+        sessionFinalizer.finalizeSession(sessionId, reason, state.getConnectionId());
+    }
+
+    private void registerProtocolViolation(String sessionId, WebSocketSession session,
+                                           SessionState state, String reason) {
+        int violations = state.incrementProtocolViolations();
+        auditLogger.record(sessionId, VoiceSessionAuditLogger.Event.PROTOCOL_VIOLATION,
+            state.getConnectionId(), reason + ", count=" + violations);
+        int maxViolations = Math.max(1, voiceInterviewProperties.getLifecycle().getMaxProtocolViolations());
+        if (violations >= maxViolations) {
+            log.warn("Closing voice session {} after {} protocol violations", sessionId, violations);
+            terminateSession(sessionId, state, "protocol_violation");
+            return;
+        }
+        sendError(session, "消息格式不正确，已忽略: " + reason);
     }
 
     @Override
@@ -419,13 +601,40 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
                 text -> handleSttResult(sessionId, text, true),
                 text -> handleSttResult(sessionId, text, false),
                 () -> sendAsrReady(session),
-                error -> {
-                    log.error("STT error for session {}", sessionId, error);
-                    sendError(session, "语音识别失败: " + error.getMessage());
-                }
+                error -> handleAsrError(sessionId, session, error)
         );
 
         scheduleAsrReadyCheck(sessionId, session, 0);
+    }
+
+    /**
+     * ASR 失败补偿：有限次自动重连，超过上限降级为「文字提交」并给出明确原因。
+     */
+    private void handleAsrError(String sessionId, WebSocketSession session, Throwable error) {
+        SessionState state = sessionStates.get(sessionId);
+        int attempt = state == null ? 0 : state.incrementAsrRestarts();
+        String errorType = error == null ? "unknown" : error.getClass().getSimpleName();
+        auditLogger.record(sessionId, VoiceSessionAuditLogger.Event.ASR_RESTART,
+            state == null ? null : state.getConnectionId(),
+            "attempt=" + attempt + ", error=" + errorType);
+
+        int maxRestarts = Math.max(1, voiceInterviewProperties.getLifecycle().getMaxAsrRestarts());
+        if (attempt > maxRestarts) {
+            if (state != null) {
+                state.markAsrDegraded();
+            }
+            auditLogger.record(sessionId, VoiceSessionAuditLogger.Event.ASR_UNAVAILABLE,
+                state == null ? null : state.getConnectionId(), "restarts_exhausted=" + attempt);
+            log.error("STT unavailable for session {} after {} restarts: {}", sessionId, attempt,
+                error == null ? "unknown" : error.getMessage());
+            sendControl(session, "asr_unavailable", "语音识别暂不可用，可改用文字提交");
+            return;
+        }
+
+        log.error("STT error for session {} (restart {}/{}): {}", sessionId, attempt, maxRestarts,
+            error == null ? "unknown" : error.getMessage());
+        sendAsrStatus(session, "asr_reconnecting", "语音识别中断，正在自动重连（第 " + attempt + " 次）");
+        restartDashScopeStt(sessionId);
     }
 
     private void scheduleAsrReadyCheck(String sessionId, WebSocketSession session, int retryCount) {
@@ -468,10 +677,7 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
                 text -> handleSttResult(sessionId, text, true),
                 text -> handleSttResult(sessionId, text, false),
                 () -> sendAsrReady(session),
-                error -> {
-                    log.error("STT error for session {}", sessionId, error);
-                    sendError(session, "语音识别失败: " + error.getMessage());
-                }
+                error -> handleAsrError(sessionId, session, error)
         );
     }
 
@@ -489,6 +695,11 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
         // AI 正在说话或处于回声冷却期时，丢弃麦克风输入，防止回声触发 LLM
         SessionState state = sessionStates.get(sessionId);
         if (state != null && state.isAiSpeakingOrCooldown()) {
+            return;
+        }
+        // ASR 已降级：继续收音频只会放大失败与潜在计费，直接丢弃（前端已提示改用文字提交）
+        if (state != null && state.isAsrDegraded()) {
+            log.debug("ASR degraded, dropping audio chunk for session {}", sessionId);
             return;
         }
 
@@ -733,7 +944,7 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
                             log.warn("[Session: {}] Fallback TTS failed: {}", sessionId, e.getMessage());
                         }
                         if (!fallbackSent) {
-                            sendTtsUnavailable(session, ttsService.getLastError());
+                            sendTtsUnavailable(sessionId, session, ttsService.getLastError());
                         }
                     }
                 } else if (!ttsFutures.isEmpty()) {
@@ -796,7 +1007,7 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
                         } else {
                             log.error("[Session: {}] All TTS calls returned empty audio", sessionId);
                             incrementCounter("app.voice.interview.tts.empty_audio", "status", "empty");
-                            sendTtsUnavailable(session, ttsService.getLastError());
+                            sendTtsUnavailable(sessionId, session, ttsService.getLastError());
                         }
                     }
                 }
@@ -828,7 +1039,7 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
                 if (aiAudio == null || aiAudio.length == 0) {
                     log.error("[Session: {}] TTS returned empty audio", sessionId);
                     incrementCounter("app.voice.interview.tts.empty_audio", "status", "empty");
-                    sendTtsUnavailable(session, ttsService.getLastError());
+                    sendTtsUnavailable(sessionId, session, ttsService.getLastError());
                 } else {
                     byte[] wavAudio = convertPcmToWav(aiAudio);
                     sendAudio(session, wavAudio, aiReply);
@@ -928,9 +1139,14 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
         )));
     }
 
-    private void sendTtsUnavailable(WebSocketSession session, String reason) {
+    private void sendTtsUnavailable(String sessionId, WebSocketSession session, String reason) {
         if (session == null || !session.isOpen()) {
             return;
+        }
+        SessionState state = sessionId == null ? null : sessionStates.get(sessionId);
+        if (sessionId != null) {
+            auditLogger.record(sessionId, VoiceSessionAuditLogger.Event.TTS_FALLBACK,
+                state == null ? null : state.getConnectionId(), "tts_unavailable");
         }
         String message = reason == null || reason.isBlank()
             ? "服务端语音合成暂不可用，请检查 TTS 配置"
@@ -973,6 +1189,20 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
             "message", message,
             "timestamp", System.currentTimeMillis()
         )));
+    }
+
+    /**
+     * 下发控制帧。message 为空时用于心跳 ping。
+     */
+    private void sendControl(WebSocketSession session, String action, String message) {
+        if (session == null || !session.isOpen()) {
+            return;
+        }
+        Map<String, Object> payload = message == null
+            ? Map.of("type", "control", "action", action, "timestamp", System.currentTimeMillis())
+            : Map.of("type", "control", "action", action, "message", message,
+                "timestamp", System.currentTimeMillis());
+        sendMessage(session, toJson(payload));
     }
 
     private void sendAudioChunk(WebSocketSession session, byte[] wavAudio, int index, boolean isLast) {
@@ -1206,6 +1436,7 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
      */
     private void handlePauseTimeout(String sessionId) {
         WebSocketSession session = sessions.get(sessionId);
+        SessionState state = sessionStates.get(sessionId);
 
         try {
             if (session != null && session.isOpen()) {
@@ -1219,6 +1450,8 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
 
             // 2. Save session state to database
             interviewService.pauseSession(sessionId, "timeout");
+            auditLogger.record(sessionId, VoiceSessionAuditLogger.Event.SESSION_PAUSED,
+                state == null ? null : state.getConnectionId(), "timeout");
 
             // 3. Close WebSocket connection
             if (session != null && session.isOpen()) {
@@ -1230,6 +1463,9 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
             sessions.remove(sessionId);
             sessionStates.remove(sessionId);
             lastActivityTime.remove(sessionId);
+            if (state != null) {
+                leaseService.release(sessionId, state.getConnectionId(), state.getFencingToken());
+            }
 
             log.info("Session {} paused due to timeout", sessionId);
 
@@ -1243,8 +1479,15 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
      * Path format: /ws/voice-interview/{sessionId}
      */
     private String extractSessionId(WebSocketSession session) {
+        if (session == null || session.getUri() == null || session.getUri().getPath() == null) {
+            return null;
+        }
         String path = session.getUri().getPath();
-        return path.substring(path.lastIndexOf('/') + 1);
+        int lastSlash = path.lastIndexOf('/');
+        if (lastSlash < 0 || lastSlash == path.length() - 1) {
+            return null;
+        }
+        return path.substring(lastSlash + 1);
     }
 
     /**
@@ -1388,6 +1631,15 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
      * Internal class to hold session state
      */
     private static class SessionState {
+        /** 当前 WebSocket 连接标识，用于租约持有者校验 */
+        private final String connectionId;
+        /** 租约栅栏令牌：新连接接管后自增，旧连接的续期/释放会被拒绝 */
+        private final long fencingToken;
+        private final AtomicLong lastInboundAt = new AtomicLong(System.currentTimeMillis());
+        private final AtomicLong lastHeartbeatPingAt = new AtomicLong(0);
+        private final AtomicInteger protocolViolations = new AtomicInteger();
+        private final AtomicInteger asrRestarts = new AtomicInteger();
+        private final AtomicBoolean asrDegraded = new AtomicBoolean(false);
         private final AtomicReference<String> accumulatedText = new AtomicReference<>("");
         private final AtomicBoolean processing = new AtomicBoolean(false);
         /** AI 正在播放 TTS 音频，期间丢弃麦克风回声 */
@@ -1402,6 +1654,55 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
         private final AtomicLong lastSttActivityAt = new AtomicLong(System.currentTimeMillis());
         /** 当前正在执行 LLM+TTS 管线的虚拟线程，断连时可中断 */
         private volatile Thread processingThread = null;
+
+        SessionState(String connectionId, long fencingToken) {
+            this.connectionId = connectionId;
+            this.fencingToken = fencingToken;
+        }
+
+        void markInbound() {
+            lastInboundAt.set(System.currentTimeMillis());
+        }
+
+        long getLastInboundAt() {
+            return lastInboundAt.get();
+        }
+
+        long getLastHeartbeatPingAt() {
+            return lastHeartbeatPingAt.get();
+        }
+
+        void setLastHeartbeatPingAt(long timestamp) {
+            lastHeartbeatPingAt.set(timestamp);
+        }
+
+        int incrementProtocolViolations() {
+            return protocolViolations.incrementAndGet();
+        }
+
+        int incrementAsrRestarts() {
+            return asrRestarts.incrementAndGet();
+        }
+
+        int getAsrRestarts() {
+            return asrRestarts.get();
+        }
+
+        boolean isAsrDegraded() {
+            return asrDegraded.get();
+        }
+
+        void markAsrDegraded() {
+            asrDegraded.set(true);
+        }
+
+        String getConnectionId() {
+            return connectionId;
+        }
+
+        long getFencingToken() {
+            return fencingToken;
+        }
 
         void appendFinalSttSegment(String segment) {
             String s = segment == null ? "" : segment.trim();

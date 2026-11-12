@@ -3,6 +3,7 @@ package interview.guide.common.result;
 import interview.guide.common.constant.CommonConstants;
 import interview.guide.common.exception.ErrorCode;
 import lombok.Getter;
+import net.minidev.json.annotate.JsonIgnore;
 
 /**
  * 统一响应结果
@@ -56,7 +57,7 @@ public class Result<T> {
     }
     
     // ========== 辅助方法 ==========
-    
+    @JsonIgnore
     public boolean isSuccess() {
         return CommonConstants.StatusCode.SUCCESS == this.code;
     }

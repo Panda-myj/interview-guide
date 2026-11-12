@@ -13,6 +13,8 @@ import org.redisson.api.RScript;
 import org.redisson.api.RedissonClient;
 import org.redisson.client.codec.StringCodec;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Component;
 import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
@@ -20,7 +22,10 @@ import org.springframework.web.context.request.ServletRequestAttributes;
 import java.io.IOException;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Collections;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.UUID;
 
@@ -81,7 +86,7 @@ public class RateLimitAspect {
 
         for (RateLimit rule : rules) {
             long intervalMs = calculateIntervalMs(rule.interval(), rule.timeUnit());
-            String key = generateKey(className, methodName, rule.dimension());
+            String key = generateKey(className, methodName, rule.dimension(), joinPoint);
 
             Long result = executeRateLimitScript(key, nowMs, requestId, intervalMs, rule.count());
 
@@ -92,22 +97,8 @@ public class RateLimitAspect {
 
         return joinPoint.proceed();
     }
-/*
-* Spring AOP 共提供 5 种通知注解，按执行时机排列如下：
-表格
-注解	执行时机	能否阻止目标方法	能否获取返回值	典型场景
-@Before	目标方法之前	❌	❌	参数校验、日志打印
-@After	目标方法之后（无论正常/异常）	❌	❌	资源清理（类似 finally）
-@AfterReturning	目标方法正常返回后	❌	✅	返回值脱敏、审计记录
-@AfterThrowing	目标方法抛出异常后	❌	✅（异常对象）	异常告警、错误码转换
-@Around	包裹整个方法执行	✅	✅	缓存、锁、监控、重试
-💡 选择原则：能用 @Before / @AfterReturning 解决的，就不要用 @Around。@Around 虽然万能，但侵入性最强、调试难度最高、性能开销略大。只有在需要控制流程或同时访问入参和返回值时才使用它。
-* */
 
-
-// 为什么用 Lua 脚本？
-// 限流需要“读取当前窗口计数 → 判断是否超限 → 写入新记录”三步操作。如果这三步在 Java 端分开执行，并发下必然出现竞态条件（Race Condition）。
-// Lua 脚本在 Redis 中是单线程原子执行的，从根本上保证了限流的准确性。
+// 限流需要「读计数→判超限→写记录」三步，Java 端分开执行存在竞态；Lua 脚本在 Redis 单线程原子执行保证准确性。
     private Long executeRateLimitScript(String key, long nowMs, String requestId, long intervalMs, double count) {
         List<Object> keysList = Collections.singletonList(key);
         Object[] args = {
@@ -193,7 +184,12 @@ long result = switch (unit) {
         return null;
     }
 
-    private String generateKey(String className, String methodName, RateLimit.Dimension dimension) {
+    private String generateKey(
+            String className,
+            String methodName,
+            RateLimit.Dimension dimension,
+            ProceedingJoinPoint joinPoint
+    ) {
         String hashTag = "{" + className + ":" + methodName + "}";
         String keyPrefix = "ratelimit:" + hashTag;
 
@@ -201,6 +197,7 @@ long result = switch (unit) {
             case GLOBAL -> keyPrefix + ":global";
             case IP -> keyPrefix + ":ip:" + getClientIp();
             case USER -> keyPrefix + ":user:" + getCurrentUserId();
+            case PHONE -> keyPrefix + ":phone:" + getCurrentPhone(joinPoint);
         };
     }
 
@@ -289,19 +286,55 @@ long result = switch (unit) {
             return "anonymous";
         }
 
-        HttpServletRequest request = attributes.getRequest();
-
-        Object userId = request.getAttribute("userId");
-        if (userId != null) {
-            return userId.toString();
-        }
-
-        userId = request.getHeader("X-User-Id");
-        if (userId != null) {
-            return userId.toString();
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        if (authentication != null && authentication.isAuthenticated()) {
+            Object principal = authentication.getPrincipal();
+            try {
+                Object userId = principal.getClass().getMethod("userId").invoke(principal);
+                if (userId != null) {
+                    return userId.toString();
+                }
+            } catch (ReflectiveOperationException ignored) {
+                // Fall through to anonymous when the current principal has no user id.
+            }
         }
 
         return "anonymous";
+    }
+
+    private String getCurrentPhone(ProceedingJoinPoint joinPoint) {
+        for (Object argument : joinPoint.getArgs()) {
+            if (argument == null) {
+                continue;
+            }
+            try {
+                Object phone = argument.getClass().getMethod("phone").invoke(argument);
+                if (phone instanceof String value && !value.isBlank()) {
+                    return sha256(value);
+                }
+            } catch (ReflectiveOperationException ignored) {
+                // Try the JavaBean accessor used by mutable request objects.
+            }
+            try {
+                Object phone = argument.getClass().getMethod("getPhone").invoke(argument);
+                if (phone instanceof String value && !value.isBlank()) {
+                    return sha256(value);
+                }
+            } catch (ReflectiveOperationException ignored) {
+                // This argument is not a phone request object.
+            }
+        }
+        return "unknown";
+    }
+
+    private String sha256(String value) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] bytes = digest.digest(value.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(bytes);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is not available", e);
+        }
     }
 }
 

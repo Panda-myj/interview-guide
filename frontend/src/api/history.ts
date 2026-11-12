@@ -123,6 +123,10 @@ export const historyApi = {
     return request.download(`/api/interview/sessions/${sessionId}/export`);
   },
 
+  async downloadResumeFile(resumeId: number): Promise<Blob> {
+    return request.download(`/api/resumes/${resumeId}/file`);
+  },
+
   /**
    * 删除简历
    */

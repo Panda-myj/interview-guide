@@ -26,11 +26,11 @@ public interface RagChatSessionRepository extends JpaRepository<RagChatSessionEn
      */
     List<RagChatSessionEntity> findAllByOrderByUpdatedAtDesc();
 
-    /**
-     * 获取所有会话（按置顶状态和更新时间排序：置顶的在前，然后按更新时间倒序）
-     */
-    @Query("SELECT s FROM RagChatSessionEntity s ORDER BY s.isPinned DESC, s.updatedAt DESC")
-    List<RagChatSessionEntity> findAllOrderByPinnedAndUpdatedAtDesc();
+    List<RagChatSessionEntity> findAllByOwnerUserIdOrderByUpdatedAtDesc(Long ownerUserId);
+
+    List<RagChatSessionEntity> findAllByOwnerUserIdOrderByIsPinnedDescUpdatedAtDesc(Long ownerUserId);
+
+    Optional<RagChatSessionEntity> findByIdAndOwnerUserId(Long id, Long ownerUserId);
 
     /**
      * 根据知识库ID查找相关会话
@@ -45,9 +45,45 @@ public interface RagChatSessionRepository extends JpaRepository<RagChatSessionEn
     @Query("SELECT DISTINCT s FROM RagChatSessionEntity s LEFT JOIN FETCH s.knowledgeBases WHERE s.id = :id")
     Optional<RagChatSessionEntity> findByIdWithMessagesAndKnowledgeBases(@Param("id") Long id);
 
+    @Query("""
+        SELECT DISTINCT s
+        FROM RagChatSessionEntity s
+        LEFT JOIN FETCH s.knowledgeBases
+        WHERE s.id = :id
+          AND s.ownerUser.id = :ownerUserId
+        """)
+    Optional<RagChatSessionEntity> findByIdWithMessagesAndKnowledgeBasesForOwner(
+        @Param("id") Long id,
+        @Param("ownerUserId") Long ownerUserId
+    );
+
     /**
      * 获取会话（带知识库，不带消息）
      */
     @Query("SELECT s FROM RagChatSessionEntity s LEFT JOIN FETCH s.knowledgeBases WHERE s.id = :id")
     Optional<RagChatSessionEntity> findByIdWithKnowledgeBases(@Param("id") Long id);
+
+    @Query("""
+        SELECT s
+        FROM RagChatSessionEntity s
+        LEFT JOIN FETCH s.knowledgeBases
+        WHERE s.id = :id
+          AND s.ownerUser.id = :ownerUserId
+        """)
+    Optional<RagChatSessionEntity> findByIdWithKnowledgeBasesForOwner(
+        @Param("id") Long id,
+        @Param("ownerUserId") Long ownerUserId
+    );
+
+    /**
+     * 批量获取用户所有会话关联的知识库名称（避免列表页逐会话懒加载 @ManyToMany，PERF-002）。
+     * 返回列：sessionId, kbName。
+     */
+    @Query("""
+        SELECT s.id, kb.name
+        FROM RagChatSessionEntity s
+        JOIN s.knowledgeBases kb
+        WHERE s.ownerUser.id = :ownerUserId
+        """)
+    List<Object[]> findKnowledgeBaseNamesByOwnerUserId(@Param("ownerUserId") Long ownerUserId);
 }

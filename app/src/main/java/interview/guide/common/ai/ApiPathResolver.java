@@ -44,18 +44,7 @@ HttpClient 适配：复用了 Spring AI 框架提供的 SpringAiOpenAiHttpClient
     return new OpenAIClientImpl(options);
   }
 
-/*1. 核心职责：智能拼接 URL 版本号
-这是这个类最主要的设计目的。调用方可能会传入 https://api.openai.com 或 https://api.deepseek.com（不带版本号），也可能传入 https://api.openai.com/v1（带版本号）。
-
-resolveVersionedBaseUrl 方法会先去掉末尾多余的反斜杠。
-
-利用正则 TRAILING_VERSION（匹配末尾的 /v1、/v2beta 等）进行检测：
-
-若已包含版本（如 /v1），直接原样返回。
-
-若未包含版本，自动在末尾追加 /v1。
-
-作用：防止开发者手误忘写版本号导致接口报错，同时也避免了重复添加 /v1/v1 的乌龙。*/
+  // baseUrl 可能带或不带 /v1 版本段（TRAILING_VERSION 检测）：已有版本原样返回，没有则补 /v1，避免手误或重复拼接。
   public static String resolveVersionedBaseUrl(String baseUrl) {
     String stripped = stripTrailingSlashes(baseUrl);
     if (baseUrlContainsVersion(stripped)) {

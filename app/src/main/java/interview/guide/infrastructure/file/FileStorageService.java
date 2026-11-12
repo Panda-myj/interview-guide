@@ -55,7 +55,11 @@ public class FileStorageService {
      * 上传简历文件
      */
     public String uploadResume(MultipartFile file) {
-        return uploadFile(file, "resumes");
+        return uploadFile(file, "legacy/resumes");
+    }
+
+    public String uploadResume(MultipartFile file, Long ownerUserId) {
+        return uploadFile(file, ownerPrefix(ownerUserId) + "resumes");
     }
 
     /**
@@ -69,7 +73,11 @@ public class FileStorageService {
      * 上传知识库文件
      */
     public String uploadKnowledgeBase(MultipartFile file) {
-        return uploadFile(file, "knowledgebases");
+        return uploadFile(file, "legacy/knowledgebases");
+    }
+
+    public String uploadKnowledgeBase(MultipartFile file, Long ownerUserId) {
+        return uploadFile(file, ownerPrefix(ownerUserId) + "knowledgebases");
     }
 
     /**
@@ -256,6 +264,13 @@ public class FileStorageService {
         String uuid = UUID.randomUUID().toString().substring(0, 8);
         String safeName = sanitizeFilename(originalFilename);
         return String.format("%s/%s/%s_%s", prefix, datePath, uuid, safeName);
+    }
+
+    private String ownerPrefix(Long ownerUserId) {
+        if (ownerUserId == null) {
+            return "legacy/";
+        }
+        return "users/" + ownerUserId + "/";
     }
 
     /**

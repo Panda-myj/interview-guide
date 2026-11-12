@@ -5,6 +5,9 @@ import interview.guide.common.constant.CommonConstants.InterviewDefaults;
 import interview.guide.common.exception.BusinessException;
 import interview.guide.common.exception.ErrorCode;
 import interview.guide.common.model.AsyncTaskStatus;
+import interview.guide.modules.auth.model.UserEntity;
+import interview.guide.modules.auth.security.CurrentUserService;
+import interview.guide.modules.resume.repository.ResumeRepository;
 import interview.guide.modules.voiceinterview.config.VoiceInterviewProperties;
 import interview.guide.modules.voiceinterview.dto.CreateSessionRequest;
 import interview.guide.modules.voiceinterview.dto.VoiceInterviewMessageDTO;
@@ -54,6 +57,8 @@ public class VoiceInterviewService {
     private final VoiceInterviewProperties properties;
     private final VoiceEvaluateStreamProducer voiceEvaluateStreamProducer;
     private final LlmProviderRegistry llmProviderRegistry;
+    private final CurrentUserService currentUserService;
+    private final ResumeRepository resumeRepository;
 
     private static final String SESSION_CACHE_KEY_PREFIX = "voice:interview:session:";
     private static final int CACHE_TTL_HOURS = 1;
@@ -72,9 +77,11 @@ public class VoiceInterviewService {
         String effectiveLlmProvider = (request.getLlmProvider() != null && !request.getLlmProvider().isBlank())
             ? request.getLlmProvider()
             : null;
+        UserEntity ownerUser = currentUserService.getRequiredUser();
+        requireOwnedResume(request.getResumeId(), ownerUser.getId());
 
         VoiceInterviewSessionEntity session = VoiceInterviewSessionEntity.builder()
-                .userId(DEFAULT_USER_ID)
+                .ownerUser(ownerUser)
                 .roleType(effectiveSkillId)
                 .skillId(effectiveSkillId)
                 .difficulty(request.getDifficulty() != null ? request.getDifficulty() : InterviewDefaults.DIFFICULTY)
@@ -100,28 +107,41 @@ public class VoiceInterviewService {
 
     /**
      * 仅当会话处于 IN_PROGRESS 状态时结束，用于 WebSocket 异常断开的兜底。
-     * 正常结束的 endSession 已设为 COMPLETED，此方法不会重复操作。
+     * 正常结束的 endSession 已设为 COMPLETED，此方法不会重复操作，
+     * 因此 WebSocket 重连不会重复触发评估。
      */
     @Transactional
     public void endSessionIfInProgress(String sessionId) {
         Long sessionIdLong = parseSessionId(sessionId);
+        if (sessionIdLong == null) {
+            log.warn("Cannot auto-end session - invalid id: {}", sessionId);
+            return;
+        }
         VoiceInterviewSessionEntity session = sessionRepository.findById(sessionIdLong).orElse(null);
         if (session == null || session.getStatus() != VoiceInterviewSessionStatus.IN_PROGRESS) {
             return;
         }
         log.info("Auto-ending IN_PROGRESS session {} after WebSocket disconnect", sessionId);
-        endSession(session);
+        if (endSession(session) && claimPendingForEvaluation(sessionIdLong)) {
+            sendEvaluateTaskAfterCommit(sessionIdLong);
+        }
     }
 
     /**
      * End interview session and update status
      * 结束面试会话并更新状态
      *
+     * <p>幂等：已结束的会话重复结束直接返回，不会重复入队评估。</p>
+     *
      * @param sessionId Session ID (String format, will be converted to Long)
      */
     @Transactional
     public void endSession(String sessionId) {
         Long sessionIdLong = parseSessionId(sessionId);
+        if (sessionIdLong == null) {
+            log.warn("Cannot end session - invalid id: {}", sessionId);
+            return;
+        }
         VoiceInterviewSessionEntity session = getSession(sessionIdLong);
 
         if (session == null) {
@@ -129,22 +149,58 @@ public class VoiceInterviewService {
             return;
         }
 
-        endSession(session);
-        sendEvaluateTaskAfterCommit(sessionIdLong);
+        if (endSession(session) && claimPendingForEvaluation(sessionIdLong)) {
+            sendEvaluateTaskAfterCommit(sessionIdLong);
+        }
     }
 
-    private void endSession(VoiceInterviewSessionEntity session) {
-        session.setEndTime(LocalDateTime.now());
-        session.setCurrentPhase(VoiceInterviewSessionEntity.InterviewPhase.COMPLETED);
-        session.setStatus(VoiceInterviewSessionStatus.COMPLETED);
-        session.setActualDuration((int) Duration.between(session.getStartTime(), LocalDateTime.now()).toSeconds());
-        session.setEvaluateStatus(AsyncTaskStatus.PENDING);
+    /**
+     * 条件结束会话。
+     *
+     * @return true 表示本次调用完成了状态迁移；false 表示会话已结束或已被并发结束
+     */
+    private boolean endSession(VoiceInterviewSessionEntity session) {
+        Long sessionId = session.getId();
+        VoiceInterviewSessionStatus current = session.getStatus();
 
-        sessionRepository.save(session);
-        invalidateSessionCache(session.getId());
+        if (current == VoiceInterviewSessionStatus.COMPLETED) {
+            log.info("Session {} already completed, ignore duplicate end request", sessionId);
+            return false;
+        }
+        if (!VoiceInterviewSessionEntity.canTransition(current, VoiceInterviewSessionStatus.COMPLETED)) {
+            throw new BusinessException(ErrorCode.VOICE_ILLEGAL_STATE_TRANSITION,
+                "会话状态为 " + current + "，无法结束");
+        }
 
-        log.info("Ended voice interview session: {}, duration: {} seconds, evaluation triggered",
-                session.getId(), session.getActualDuration());
+        // 条件更新：IN_PROGRESS/PAUSED -> COMPLETED，防止并发结束重复写
+        int updated = sessionRepository.updateStatusConditionally(
+            sessionId,
+            VoiceInterviewSessionStatus.COMPLETED,
+            List.of(VoiceInterviewSessionStatus.IN_PROGRESS, VoiceInterviewSessionStatus.PAUSED));
+        if (updated == 0) {
+            log.info("Session {} status was already changed by concurrent request", sessionId);
+            return false;
+        }
+
+        VoiceInterviewSessionEntity latest = sessionRepository.findById(sessionId).orElse(null);
+        if (latest == null) {
+            log.warn("Session {} disappeared while ending", sessionId);
+            return false;
+        }
+
+        LocalDateTime now = LocalDateTime.now();
+        latest.setStatus(VoiceInterviewSessionStatus.COMPLETED);
+        latest.setEndTime(now);
+        latest.setCurrentPhase(VoiceInterviewSessionEntity.InterviewPhase.COMPLETED);
+        latest.setActualDuration(latest.getStartTime() == null
+            ? 0
+            : (int) Duration.between(latest.getStartTime(), now).toSeconds());
+        sessionRepository.save(latest);
+        invalidateSessionCache(sessionId);
+
+        log.info("Ended voice interview session: {}, duration: {} seconds",
+            sessionId, latest.getActualDuration());
+        return true;
     }
 
     /**
@@ -184,6 +240,31 @@ public class VoiceInterviewService {
         return sessionRepository.findById(sessionId).orElse(null);
     }
 
+    public VoiceInterviewSessionEntity requireOwned(Long sessionId) {
+        return sessionRepository.findByIdAndOwnerUserId(sessionId, currentUserService.getRequiredUserId())
+            .orElseThrow(() -> new BusinessException(ErrorCode.VOICE_SESSION_NOT_FOUND, "语音面试会话不存在"));
+    }
+
+    /**
+     * 按当前登录用户查询会话并转换为响应 DTO。
+     *
+     * <p>绕过 Redis 缓存，避免缓存中的旧状态被返回给前端（评估状态频繁变化）。</p>
+     */
+    public SessionResponseDTO getOwnedSessionDTO(Long sessionId) {
+        return buildSessionResponse(requireOwned(sessionId));
+    }
+
+    /**
+     * 校验简历归属：只允许把当前用户自己的简历拼进 LLM 提示词。
+     */
+    private void requireOwnedResume(Long resumeId, Long ownerUserId) {
+        if (resumeId == null) {
+            return;
+        }
+        resumeRepository.findByIdAndOwnerUserId(resumeId, ownerUserId)
+            .orElseThrow(() -> new BusinessException(ErrorCode.RESUME_NOT_FOUND, "简历不存在或无权访问"));
+    }
+
     /**
      * Start a new interview phase
      * 开始新的面试阶段
@@ -200,21 +281,24 @@ public class VoiceInterviewService {
             log.warn("Cannot start phase - session not found: {}", sessionId);
             return;
         }
-
-        try {
-            VoiceInterviewSessionEntity.InterviewPhase newPhase =
-                    VoiceInterviewSessionEntity.InterviewPhase.valueOf(phaseStr.toUpperCase());
-
-            VoiceInterviewSessionEntity.InterviewPhase oldPhase = session.getCurrentPhase();
-            session.setCurrentPhase(newPhase);
-            sessionRepository.save(session);
-            cacheSession(session); // Update cache
-
-            log.info("Session {} transitioned from phase {} to {}", sessionId, oldPhase, newPhase);
-
-        } catch (IllegalArgumentException e) {
-            log.error("Invalid phase string: {}", phaseStr, e);
+        if (session.getStatus() != VoiceInterviewSessionStatus.IN_PROGRESS) {
+            throw new BusinessException(ErrorCode.VOICE_ILLEGAL_STATE_TRANSITION,
+                "会话状态为 " + session.getStatus() + "，无法切换阶段");
         }
+
+        VoiceInterviewSessionEntity.InterviewPhase newPhase;
+        try {
+            newPhase = VoiceInterviewSessionEntity.InterviewPhase.valueOf(phaseStr.toUpperCase());
+        } catch (IllegalArgumentException e) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "无效的面试阶段: " + phaseStr);
+        }
+
+        VoiceInterviewSessionEntity.InterviewPhase oldPhase = session.getCurrentPhase();
+        session.setCurrentPhase(newPhase);
+        sessionRepository.save(session);
+        cacheSession(session); // Update cache
+
+        log.info("Session {} transitioned from phase {} to {}", sessionId, oldPhase, newPhase);
     }
 
     /**
@@ -326,19 +410,33 @@ public class VoiceInterviewService {
     @Transactional
     public void pauseSession(String sessionId, String reason) {
         Long sessionIdLong = parseSessionId(sessionId);
+        if (sessionIdLong == null) {
+            throw new BusinessException(ErrorCode.VOICE_SESSION_NOT_FOUND, "会话ID无效: " + sessionId);
+        }
 
         VoiceInterviewSessionEntity session = sessionRepository.findById(sessionIdLong)
             .orElseThrow(() -> new BusinessException(ErrorCode.NOT_FOUND, "会话不存在: " + sessionId));
 
+        if (session.getStatus() == VoiceInterviewSessionStatus.PAUSED) {
+            log.info("Session {} already paused, ignore duplicate pause request", sessionId);
+            return;
+        }
         if (session.getStatus() != VoiceInterviewSessionStatus.IN_PROGRESS) {
-            throw new BusinessException(ErrorCode.BAD_REQUEST,
-                "会话状态为 " + session.getStatus() + "，无法暂停"
-            );
+            throw new BusinessException(ErrorCode.VOICE_ILLEGAL_STATE_TRANSITION,
+                "会话状态为 " + session.getStatus() + "，无法暂停");
+        }
+
+        int updated = sessionRepository.updateStatusConditionally(
+            sessionIdLong,
+            VoiceInterviewSessionStatus.PAUSED,
+            List.of(VoiceInterviewSessionStatus.IN_PROGRESS));
+        if (updated == 0) {
+            throw new BusinessException(ErrorCode.VOICE_ILLEGAL_STATE_TRANSITION,
+                "会话状态已变化，无法暂停: " + sessionId);
         }
 
         session.setStatus(VoiceInterviewSessionStatus.PAUSED);
         session.setPausedAt(LocalDateTime.now());
-
         sessionRepository.save(session);
         invalidateSessionCache(sessionIdLong);
 
@@ -355,14 +453,29 @@ public class VoiceInterviewService {
     @Transactional
     public SessionResponseDTO resumeSession(String sessionId) {
         Long sessionIdLong = parseSessionId(sessionId);
+        if (sessionIdLong == null) {
+            throw new BusinessException(ErrorCode.VOICE_SESSION_NOT_FOUND, "会话ID无效: " + sessionId);
+        }
 
         VoiceInterviewSessionEntity session = sessionRepository.findById(sessionIdLong)
             .orElseThrow(() -> new BusinessException(ErrorCode.NOT_FOUND, "会话不存在: " + sessionId));
 
+        if (session.getStatus() == VoiceInterviewSessionStatus.IN_PROGRESS) {
+            log.info("Session {} already in progress, ignore duplicate resume request", sessionId);
+            return buildSessionResponse(session);
+        }
         if (session.getStatus() != VoiceInterviewSessionStatus.PAUSED) {
-            throw new BusinessException(ErrorCode.BAD_REQUEST,
-                "会话状态为 " + session.getStatus() + "，无法恢复"
-            );
+            throw new BusinessException(ErrorCode.VOICE_ILLEGAL_STATE_TRANSITION,
+                "会话状态为 " + session.getStatus() + "，无法恢复");
+        }
+
+        int updated = sessionRepository.updateStatusConditionally(
+            sessionIdLong,
+            VoiceInterviewSessionStatus.IN_PROGRESS,
+            List.of(VoiceInterviewSessionStatus.PAUSED));
+        if (updated == 0) {
+            throw new BusinessException(ErrorCode.VOICE_ILLEGAL_STATE_TRANSITION,
+                "会话状态已变化，无法恢复: " + sessionId);
         }
 
         session.setStatus(VoiceInterviewSessionStatus.IN_PROGRESS);
@@ -385,16 +498,18 @@ public class VoiceInterviewService {
      * @param status Filter by status (optional)
      * @return List of session metadata
      */
-    public List<SessionMetaDTO> getAllSessions(String userId, String status) {
-        userId = userId != null ? userId : DEFAULT_USER_ID;
+    public List<SessionMetaDTO> getAllSessions(String ownerUserId, String status) {
+        ownerUserId = ownerUserId != null ? ownerUserId : DEFAULT_USER_ID;
 
         List<VoiceInterviewSessionEntity> sessions;
         if (status != null && !status.isEmpty()) {
             VoiceInterviewSessionStatus statusEnum =
                 VoiceInterviewSessionStatus.valueOf(status.toUpperCase());
-            sessions = sessionRepository.findByUserIdAndStatusOrderByUpdatedAtDesc(userId, statusEnum);
+            sessions = sessionRepository.findAllByOwnerUserIdAndStatusOrderByUpdatedAtDesc(
+                parseOwnerUserId(ownerUserId), statusEnum
+            );
         } else {
-            sessions = sessionRepository.findByUserIdOrderByUpdatedAtDesc(userId);
+            sessions = sessionRepository.findAllByOwnerUserIdOrderByUpdatedAtDesc(parseOwnerUserId(ownerUserId));
         }
 
         return sessions.stream()
@@ -561,28 +676,110 @@ public class VoiceInterviewService {
     }
 
     /**
-     * Update evaluation status on session entity (shared by Producer/Consumer/Controller)
+     * Update evaluation status on session entity (shared by Producer/Consumer/Controller).
+     *
+     * <p>按状态机执行条件更新：仅允许 PENDING→PROCESSING、PROCESSING→COMPLETED、
+     * PENDING/PROCESSING→FAILED、FAILED→PENDING，非法或过期迁移会被忽略并记录日志，
+     * 避免重复投递覆盖已完成结果。</p>
      */
+    @Transactional
     public void updateEvaluateStatus(Long sessionId, AsyncTaskStatus status, String error) {
-        try {
-            sessionRepository.findById(sessionId).ifPresent(session -> {
-                session.setEvaluateStatus(status);
-                session.setEvaluateError(error);
-                sessionRepository.save(session);
-                log.debug("Evaluation status updated: sessionId={}, status={}", sessionId, status);
-            });
-        } catch (Exception e) {
-            log.error("Failed to update evaluation status: sessionId={}, status={}, error={}",
-                    sessionId, status, e.getMessage(), e);
+        if (status == null) {
+            return;
+        }
+        switch (status) {
+            case PROCESSING -> claimEvaluationProcessing(sessionId);
+            case COMPLETED -> completeEvaluation(sessionId);
+            case FAILED -> failEvaluation(sessionId, error);
+            case PENDING -> {
+                if (!claimPendingForEvaluation(sessionId)) {
+                    log.info("Evaluation status cannot move to PENDING: sessionId={}", sessionId);
+                }
+            }
         }
     }
 
     /**
-     * Trigger async evaluation for a session (called by Controller)
+     * 抢占评估任务：PENDING → PROCESSING（条件更新，按影响行数判断）。
+     *
+     * @return true 表示抢到处理权；false 表示消息重复、乱序或已被其它实例处理
+     */
+    @Transactional
+    public boolean claimEvaluationProcessing(Long sessionId) {
+        int updated = sessionRepository.claimEvaluateStatus(
+            sessionId, AsyncTaskStatus.PENDING, AsyncTaskStatus.PROCESSING);
+        if (updated == 0) {
+            log.info("Evaluation task not claimed (duplicate or stale): sessionId={}", sessionId);
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * 评估完成：PROCESSING → COMPLETED。
+     */
+    @Transactional
+    public void completeEvaluation(Long sessionId) {
+        int updated = sessionRepository.updateEvaluateStatusConditionally(
+            sessionId, AsyncTaskStatus.COMPLETED, List.of(AsyncTaskStatus.PROCESSING), null);
+        if (updated == 0) {
+            log.warn("Evaluation COMPLETED not written, status may be updated elsewhere: sessionId={}",
+                sessionId);
+        }
+    }
+
+    /**
+     * 评估失败：PENDING/PROCESSING → FAILED。
+     */
+    @Transactional
+    public void failEvaluation(Long sessionId, String error) {
+        String truncated = error != null && error.length() > 500 ? error.substring(0, 500) : error;
+        int updated = sessionRepository.updateEvaluateStatusConditionally(
+            sessionId, AsyncTaskStatus.FAILED,
+            List.of(AsyncTaskStatus.PENDING, AsyncTaskStatus.PROCESSING), truncated);
+        if (updated == 0) {
+            log.warn("Evaluation FAILED not written, task may be completed: sessionId={}", sessionId);
+        }
+    }
+
+    /**
+     * 重试前把评估状态回退为 PENDING。
+     *
+     * <p>允许 PROCESSING → PENDING（执行中失败）和 PENDING → PENDING（占位阶段失败），
+     * COMPLETED/FAILED 不再回退，避免重复副作用。</p>
+     *
+     * @return true 表示允许重新入队；false 表示任务已完成或状态已变化
+     */
+    @Transactional
+    public boolean resetEvaluationForRetry(Long sessionId) {
+        return sessionRepository.updateEvaluateStatusConditionally(
+            sessionId, AsyncTaskStatus.PENDING,
+            List.of(AsyncTaskStatus.PROCESSING, AsyncTaskStatus.PENDING), null) > 0;
+    }
+
+    /**
+     * 申请评估任务：未初始化或 FAILED 时才迁移到 PENDING，避免重复入队。
+     */
+    private boolean claimPendingForEvaluation(Long sessionId) {
+        int initialized = sessionRepository.initializeEvaluateStatus(
+            sessionId, AsyncTaskStatus.PENDING, null);
+        int replayed = sessionRepository.updateEvaluateStatusConditionally(
+            sessionId, AsyncTaskStatus.PENDING, List.of(AsyncTaskStatus.FAILED), null);
+        return initialized + replayed > 0;
+    }
+
+    /**
+     * Trigger async evaluation for a session (called by Controller).
+     *
+     * <p>幂等：仅在评估状态可迁移到 PENDING 时入队；已完成或处理中直接返回。</p>
      */
     @Transactional
     public void triggerEvaluation(Long sessionId) {
-        updateEvaluateStatus(sessionId, AsyncTaskStatus.PENDING, null);
+        if (!claimPendingForEvaluation(sessionId)) {
+            log.info("Evaluation already queued or completed, skip duplicate trigger: sessionId={}",
+                sessionId);
+            return;
+        }
         sendEvaluateTaskAfterCommit(sessionId);
     }
 
@@ -606,9 +803,7 @@ public class VoiceInterviewService {
      */
     @Transactional
     public void deleteSession(Long sessionId) {
-        if (!sessionRepository.existsById(sessionId)) {
-            throw new BusinessException(ErrorCode.VOICE_SESSION_NOT_FOUND, "会话不存在: " + sessionId);
-        }
+        requireOwned(sessionId);
         evaluationRepository.findBySessionId(sessionId).ifPresent(evaluationRepository::delete);
         messageRepository.deleteBySessionId(sessionId);
         sessionRepository.deleteById(sessionId);
@@ -657,6 +852,14 @@ public class VoiceInterviewService {
         }
     }
 
+    private Long parseOwnerUserId(String ownerUserId) {
+        try {
+            return Long.parseLong(ownerUserId);
+        } catch (NumberFormatException e) {
+            throw new BusinessException(ErrorCode.NOT_FOUND, "用户不存在");
+        }
+    }
+
     /**
      * 清理超时的 IN_PROGRESS 会话和卡住的 PROCESSING 评估。
      * 由 @Scheduled 在 WebSocketHandler 中定时触发。
@@ -682,10 +885,13 @@ public class VoiceInterviewService {
 
         for (VoiceInterviewSessionEntity session : stuckEvals) {
             log.info("Resetting stuck PROCESSING evaluation for session {}", session.getId());
-            session.setEvaluateStatus(AsyncTaskStatus.FAILED);
-            session.setEvaluateError("评估超时，请重新触发");
-            sessionRepository.save(session);
-            cleaned++;
+            // 条件更新 PROCESSING → FAILED，避免覆盖并发完成的评估结果
+            int updated = sessionRepository.updateEvaluateStatusConditionally(
+                session.getId(), AsyncTaskStatus.FAILED, List.of(AsyncTaskStatus.PROCESSING),
+                "评估超时，请重新触发");
+            if (updated > 0) {
+                cleaned++;
+            }
         }
 
         return cleaned;

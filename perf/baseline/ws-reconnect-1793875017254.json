@@ -1,0 +1,232 @@
+{
+  "startedAt": "2026-11-05T10:36:27.001Z",
+  "concurrency": 10,
+  "dropRate": 0.2,
+  "sessions": [
+    {
+      "sessionId": "27",
+      "connected": true,
+      "reconnects": 1,
+      "framesSent": 10,
+      "framesDropped": 60,
+      "firstReplyLatencyMs": 108,
+      "recoveries": [
+        {
+          "reconnected": true,
+          "recoveryMs": 420
+        }
+      ],
+      "errors": [],
+      "finalState": "control"
+    },
+    {
+      "sessionId": "31",
+      "connected": true,
+      "reconnects": 2,
+      "framesSent": 23,
+      "framesDropped": 59,
+      "firstReplyLatencyMs": 98,
+      "recoveries": [
+        {
+          "reconnected": true,
+          "recoveryMs": 485
+        },
+        {
+          "reconnected": true,
+          "recoveryMs": 493
+        }
+      ],
+      "errors": [],
+      "finalState": "control"
+    },
+    {
+      "sessionId": "28",
+      "connected": true,
+      "reconnects": 1,
+      "framesSent": 25,
+      "framesDropped": 54,
+      "firstReplyLatencyMs": 98,
+      "recoveries": [
+        {
+          "reconnected": true,
+          "recoveryMs": 438
+        }
+      ],
+      "errors": [],
+      "finalState": "control"
+    },
+    {
+      "sessionId": "23",
+      "connected": true,
+      "reconnects": 1,
+      "framesSent": 5,
+      "framesDropped": 64,
+      "firstReplyLatencyMs": 118,
+      "recoveries": [
+        {
+          "reconnected": true,
+          "recoveryMs": 340
+        }
+      ],
+      "errors": [],
+      "finalState": "control"
+    },
+    {
+      "sessionId": "32",
+      "connected": true,
+      "reconnects": 4,
+      "framesSent": 83,
+      "framesDropped": 55,
+      "firstReplyLatencyMs": 99,
+      "recoveries": [
+        {
+          "reconnected": true,
+          "recoveryMs": 512
+        },
+        {
+          "reconnected": true,
+          "recoveryMs": 516
+        },
+        {
+          "reconnected": true,
+          "recoveryMs": 519
+        },
+        {
+          "reconnected": true,
+          "recoveryMs": 503
+        }
+      ],
+      "errors": [],
+      "finalState": "control"
+    },
+    {
+      "sessionId": "25",
+      "connected": true,
+      "reconnects": 1,
+      "framesSent": 31,
+      "framesDropped": 65,
+      "firstReplyLatencyMs": 102,
+      "recoveries": [
+        {
+          "reconnected": true,
+          "recoveryMs": 365
+        }
+      ],
+      "errors": [],
+      "finalState": "control"
+    },
+    {
+      "sessionId": "29",
+      "connected": true,
+      "reconnects": 1,
+      "framesSent": 16,
+      "framesDropped": 54,
+      "firstReplyLatencyMs": 98,
+      "recoveries": [
+        {
+          "reconnected": true,
+          "recoveryMs": 457
+        }
+      ],
+      "errors": [],
+      "finalState": "control"
+    },
+    {
+      "sessionId": "24",
+      "connected": true,
+      "reconnects": 3,
+      "framesSent": 212,
+      "framesDropped": 55,
+      "firstReplyLatencyMs": 100,
+      "recoveries": [
+        {
+          "reconnected": true,
+          "recoveryMs": 355
+        },
+        {
+          "reconnected": true,
+          "recoveryMs": 349
+        },
+        {
+          "reconnected": true,
+          "recoveryMs": 354
+        }
+      ],
+      "errors": [],
+      "finalState": "control"
+    },
+    {
+      "sessionId": "26",
+      "connected": true,
+      "reconnects": 1,
+      "framesSent": 20,
+      "framesDropped": 56,
+      "firstReplyLatencyMs": 98,
+      "recoveries": [
+        {
+          "reconnected": true,
+          "recoveryMs": 394
+        }
+      ],
+      "errors": [],
+      "finalState": "control"
+    },
+    {
+      "sessionId": "30",
+      "connected": true,
+      "reconnects": 7,
+      "framesSent": 206,
+      "framesDropped": 41,
+      "firstReplyLatencyMs": 97,
+      "recoveries": [
+        {
+          "reconnected": true,
+          "recoveryMs": 484
+        },
+        {
+          "reconnected": true,
+          "recoveryMs": 480
+        },
+        {
+          "reconnected": true,
+          "recoveryMs": 476
+        },
+        {
+          "reconnected": true,
+          "recoveryMs": 472
+        },
+        {
+          "reconnected": true,
+          "recoveryMs": 467
+        },
+        {
+          "reconnected": true,
+          "recoveryMs": 476
+        },
+        {
+          "reconnected": true,
+          "recoveryMs": 475
+        }
+      ],
+      "errors": [],
+      "finalState": "control"
+    }
+  ],
+  "summary": {
+    "sessions": 10,
+    "connected": 10,
+    "totalReconnects": 22,
+    "successfulReconnects": 22,
+    "framesSent": 631,
+    "framesDropped": 563,
+    "firstReplyLatencyP50": 99,
+    "firstReplyLatencyP95": 118,
+    "firstReplyLatencyMax": 118,
+    "target": {
+      "concurrency": 10,
+      "endToEndLatencyMs": 2000,
+      "dropRate": 0.2
+    }
+  },
+  "finishedAt": "2026-11-05T10:36:57.254Z"
+}

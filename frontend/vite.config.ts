@@ -20,7 +20,11 @@ export default defineConfig(({ mode }) => {
           manualChunks: {
             'react-vendor': ['react', 'react-dom', 'react-router-dom'],
             'ui-vendor': ['framer-motion', 'lucide-react'],
+            // 高亮器已改为 prism-light 按需加载，独立成块以便浏览器按需缓存
             'syntax-highlighter': ['react-syntax-highlighter'],
+            // 图表与 Markdown 渲染体积较大，单独成块避免页面 chunk 超过 500 kB
+            'charts-vendor': ['recharts'],
+            'markdown-vendor': ['react-markdown', 'remark-gfm'],
           },
         },
       },
