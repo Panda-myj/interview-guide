@@ -17,16 +17,26 @@ public class AuthSupport {
     private static final Pattern MAINLAND_MOBILE = Pattern.compile("^1[3-9]\\d{9}$");
 
     public String normalizePhone(String rawPhone) {
+        String normalized = normalizePhoneKey(rawPhone);
+        if (normalized == null) {
+            throw new BusinessException(ErrorCode.AUTH_INVALID_PHONE, "请输入正确的 11 位手机号");
+        }
+        return normalized;
+    }
+
+    /**
+     * 无副作用的手机号归一化，供登录链路与限流维度共用。
+     *
+     * @return 归一化后的 E.164 号码；格式非法时返回 {@code null}（不抛异常，避免限流切面中断业务）
+     */
+    public static String normalizePhoneKey(String rawPhone) {
         String phone = rawPhone == null ? "" : rawPhone.replaceAll("[\\s-]", "");
         if (phone.startsWith("+86")) {
             phone = phone.substring(3);
         } else if (phone.startsWith("86") && phone.length() == 13) {
             phone = phone.substring(2);
         }
-        if (!MAINLAND_MOBILE.matcher(phone).matches()) {
-            throw new BusinessException(ErrorCode.AUTH_INVALID_PHONE, "请输入正确的 11 位手机号");
-        }
-        return "+86" + phone;
+        return MAINLAND_MOBILE.matcher(phone).matches() ? "+86" + phone : null;
     }
 
     public String maskPhone(String phone) {

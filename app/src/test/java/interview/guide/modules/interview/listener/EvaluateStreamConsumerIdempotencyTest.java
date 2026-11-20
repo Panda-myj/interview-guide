@@ -1,6 +1,6 @@
 package interview.guide.modules.interview.listener;
 
-import interview.guide.common.ai.LlmProviderRegistry;
+import interview.guide.modules.llmprovider.service.UserLlmConfigService;
 import interview.guide.common.constant.AsyncTaskStreamConstants;
 import interview.guide.common.model.AsyncTaskStatus;
 import interview.guide.infrastructure.redis.RedisService;
@@ -10,8 +10,11 @@ import interview.guide.modules.interview.model.InterviewSessionEntity;
 import interview.guide.modules.interview.repository.InterviewSessionRepository;
 import interview.guide.modules.interview.service.AnswerEvaluationService;
 import interview.guide.modules.interview.service.InterviewPersistenceService;
+import interview.guide.modules.auth.model.UserEntity;
 import interview.guide.modules.interview.service.InterviewSessionService;
+import org.springframework.ai.chat.client.ChatClient;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -21,6 +24,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.redisson.api.stream.StreamMessageId;
+import org.springframework.security.core.context.SecurityContextHolder;
 import tools.jackson.databind.ObjectMapper;
 
 import java.util.List;
@@ -32,6 +36,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -55,7 +60,7 @@ class EvaluateStreamConsumerIdempotencyTest {
     @Mock
     private InterviewSessionService sessionService;
     @Mock
-    private LlmProviderRegistry llmProviderRegistry;
+    private UserLlmConfigService userLlmConfigService;
 
     private TestableConsumer consumer;
 
@@ -64,8 +69,14 @@ class EvaluateStreamConsumerIdempotencyTest {
 
     @BeforeEach
     void setUp() {
+        SecurityContextHolder.clearContext();
         consumer = new TestableConsumer(redisService, sessionRepository, evaluationService,
-            persistenceService, objectMapper, llmProviderRegistry, sessionService);
+            persistenceService, objectMapper, userLlmConfigService, sessionService);
+    }
+
+    @AfterEach
+    void tearDown() {
+        SecurityContextHolder.clearContext();
     }
 
     @Nested
@@ -83,7 +94,8 @@ class EvaluateStreamConsumerIdempotencyTest {
 
             consumer.process(messageId, payload("session-1", 0));
 
-            verify(evaluationService, never()).evaluateInterview(any(), anyString(), anyString(), any());
+            verify(evaluationService, never()).evaluateInterview(
+                any(), anyString(), anyString(), anyString(), any());
             verify(redisService).streamAck(anyString(), anyString(), any(StreamMessageId.class));
             verify(sessionService, never()).completeEvaluation(anyString());
         }
@@ -99,7 +111,8 @@ class EvaluateStreamConsumerIdempotencyTest {
             consumer.process(messageId, payload("session-1", 0));
 
             verify(sessionService, never()).claimEvaluationProcessing(anyString());
-            verify(evaluationService, never()).evaluateInterview(any(), anyString(), anyString(), any());
+            verify(evaluationService, never()).evaluateInterview(
+                any(), anyString(), anyString(), anyString(), any());
         }
 
         @Test
@@ -110,7 +123,8 @@ class EvaluateStreamConsumerIdempotencyTest {
             consumer.process(messageId, payload("session-1", 0));
 
             verify(redisService).streamAck(anyString(), anyString(), any(StreamMessageId.class));
-            verify(evaluationService, never()).evaluateInterview(any(), anyString(), anyString(), any());
+            verify(evaluationService, never()).evaluateInterview(
+                any(), anyString(), anyString(), anyString(), any());
         }
 
         @Test
@@ -125,7 +139,8 @@ class EvaluateStreamConsumerIdempotencyTest {
 
             consumer.process(messageId, payload("session-1", 0));
 
-            verify(evaluationService, never()).evaluateInterview(any(), anyString(), anyString(), any());
+            verify(evaluationService, never()).evaluateInterview(
+                any(), anyString(), anyString(), anyString(), any());
             verify(persistenceService, never()).saveReport(anyString(), any());
             verify(sessionService).completeEvaluation("session-1");
         }
@@ -141,19 +156,24 @@ class EvaluateStreamConsumerIdempotencyTest {
             InterviewSessionEntity session = session("session-1",
                 InterviewSessionEntity.SessionStatus.COMPLETED);
             session.setEvaluateStatus(AsyncTaskStatus.PENDING);
+            session.setSkillId("java-backend");
             when(sessionRepository.findBySessionId("session-1")).thenReturn(Optional.of(session));
             when(sessionRepository.findBySessionIdWithResume("session-1")).thenReturn(Optional.of(session));
             when(sessionService.claimEvaluationProcessing("session-1")).thenReturn(true);
             when(persistenceService.findAnswersBySessionId("session-1")).thenReturn(List.of());
+            when(userLlmConfigService.requireChatClientForUser(any()))
+                .thenReturn(mock(ChatClient.class));
 
             InterviewReportDTO report = new InterviewReportDTO("session-1", 1, 80,
                 List.of(), List.of(), "ok", List.of(), List.of(), List.of());
-            when(evaluationService.evaluateInterview(any(), anyString(), anyString(), any()))
+            when(evaluationService.evaluateInterview(
+                any(), anyString(), anyString(), anyString(), any()))
                 .thenReturn(report);
 
             consumer.process(messageId, payload("session-1", 0));
 
-            verify(evaluationService).evaluateInterview(any(), anyString(), anyString(), any());
+            verify(evaluationService).evaluateInterview(
+                any(), eq("session-1"), eq("java-backend"), anyString(), any());
             verify(persistenceService).saveReport("session-1", report);
             verify(sessionService).completeEvaluation("session-1");
             verify(redisService).streamAck(anyString(), anyString(), any(StreamMessageId.class));
@@ -208,7 +228,8 @@ class EvaluateStreamConsumerIdempotencyTest {
         when(sessionRepository.findBySessionIdWithResume("session-1")).thenReturn(Optional.of(session));
         when(sessionService.claimEvaluationProcessing("session-1")).thenReturn(true);
         when(persistenceService.findAnswersBySessionId("session-1")).thenReturn(List.of());
-        when(evaluationService.evaluateInterview(any(), anyString(), anyString(), any()))
+        when(evaluationService.evaluateInterview(
+            any(), anyString(), anyString(), anyString(), any()))
             .thenThrow(new IllegalStateException("llm down"));
     }
 
@@ -220,6 +241,7 @@ class EvaluateStreamConsumerIdempotencyTest {
         session.setLlmProvider("dashscope");
         session.setQuestionsJson(objectMapper.writeValueAsString(
             List.of(InterviewQuestionDTO.create(0, "问题", "JAVA", "Java"))));
+        session.setOwnerUser(mock(UserEntity.class));
         return session;
     }
 
@@ -240,10 +262,10 @@ class EvaluateStreamConsumerIdempotencyTest {
                          AnswerEvaluationService evaluationService,
                          InterviewPersistenceService persistenceService,
                          ObjectMapper objectMapper,
-                         LlmProviderRegistry llmProviderRegistry,
+                         UserLlmConfigService userLlmConfigService,
                          InterviewSessionService sessionService) {
             super(redisService, sessionRepository, evaluationService, persistenceService,
-                objectMapper, llmProviderRegistry, sessionService);
+                objectMapper, userLlmConfigService, sessionService);
         }
 
         void process(StreamMessageId messageId, Map<String, String> data) {

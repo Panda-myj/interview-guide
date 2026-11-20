@@ -286,6 +286,10 @@ export class VoiceInterviewWebSocket {
   private reconnectDelay = 1000;
   private manuallyClosed = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  // 连接握手兜底超时：覆盖「换票 HTTP + WS 握手」全过程。
+  // 缺少该超时时，任一步骤挂起都会让页面永久停留在 connecting 状态。
+  private connectionTimeoutMs = 15000;
+  private connectionTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(sessionId: number, url: string, handlers: WebSocketEventHandlers) {
     this.sessionId = sessionId;
@@ -302,7 +306,58 @@ export class VoiceInterviewWebSocket {
       this.reconnectTimer = null;
     }
     this.manuallyClosed = false;
+    this.armConnectionTimeout();
     void this.openWithTicket();
+  }
+
+  /** 启动握手超时；超时后主动脱离 connecting 并进入统一重连流程 */
+  private armConnectionTimeout(): void {
+    this.clearConnectionTimeout();
+    this.connectionTimer = setTimeout(() => {
+      this.connectionTimer = null;
+      if (this.manuallyClosed) {
+        return;
+      }
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        return;
+      }
+      console.warn(`WebSocket 连接超时（${this.connectionTimeoutMs}ms），触发重连`);
+      this.handlers.onError?.(new Event('connection-timeout'));
+      // 用非 1000 关闭码触发 onclose -> 统一重连（覆盖 ws 处于 CONNECTING 的情况）
+      try {
+        this.ws?.close(4000, 'connection timeout');
+      } catch {
+        // 连接尚未建立时 close 可能抛错，下面的兜底重连仍会执行
+      }
+      this.scheduleReconnect();
+    }, this.connectionTimeoutMs);
+  }
+
+  private clearConnectionTimeout(): void {
+    if (this.connectionTimer) {
+      clearTimeout(this.connectionTimer);
+      this.connectionTimer = null;
+    }
+  }
+
+  /** 统一的指数退避重连入口，换票失败 / 握手超时 / 连接关闭共用 */
+  private scheduleReconnect(): void {
+    if (this.manuallyClosed) {
+      return;
+    }
+    if (this.reconnectTimer) {
+      return;
+    }
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      return;
+    }
+    this.reconnectAttempts++;
+    const backoff = Math.min(15000, this.reconnectDelay * 2 ** (this.reconnectAttempts - 1));
+    const delay = backoff + Math.floor(Math.random() * 250);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect();
+    }, delay);
   }
 
   private async openWithTicket(): Promise<void> {
@@ -311,6 +366,7 @@ export class VoiceInterviewWebSocket {
       this.ws = new WebSocket(this.url);
 
       this.ws.onopen = () => {
+        this.clearConnectionTimeout();
         this.reconnectAttempts = 0;
         this.handlers.onOpen?.();
       };
@@ -367,31 +423,25 @@ export class VoiceInterviewWebSocket {
       };
 
       this.ws.onclose = (event) => {
+        this.clearConnectionTimeout();
         this.handlers.onClose?.(event);
 
         if (this.manuallyClosed || event.wasClean) {
           return;
         }
-        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-          return;
-        }
-
-        // 指数退避 + 随机抖动，避免服务重启时所有客户端同时重连造成惊群
-        this.reconnectAttempts++;
-        const backoff = Math.min(15000, this.reconnectDelay * 2 ** (this.reconnectAttempts - 1));
-        const delay = backoff + Math.floor(Math.random() * 250);
-        if (this.reconnectTimer) {
-          clearTimeout(this.reconnectTimer);
-        }
-        this.reconnectTimer = setTimeout(() => this.connect(), delay);
+        this.scheduleReconnect();
       };
 
       this.ws.onerror = (error) => {
         this.handlers.onError?.(error);
       };
     } catch (error) {
+      // 换票失败时 ws 尚未创建，onclose 永远不会触发；必须在此显式走重连，
+      // 否则一次票据失败就会让会话永久停留在 connecting/disconnected。
+      this.clearConnectionTimeout();
       console.error('Error creating WebSocket connection:', error);
       this.handlers.onError?.(error as Event);
+      this.scheduleReconnect();
     }
   }
 
@@ -436,6 +486,7 @@ export class VoiceInterviewWebSocket {
   disconnect(): void {
     this.manuallyClosed = true;
     this.reconnectAttempts = this.maxReconnectAttempts;
+    this.clearConnectionTimeout();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;

@@ -9,6 +9,7 @@ import com.alibaba.dashscope.audio.omni.OmniRealtimeTranscriptionParam;
 import com.alibaba.dashscope.exception.NoApiKeyException;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import interview.guide.modules.llmprovider.service.VoiceRuntime;
 import interview.guide.modules.voiceinterview.config.VoiceInterviewProperties;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -161,8 +162,21 @@ public class QwenAsrService {
             Consumer<String> onPartial,
             Runnable onReady,
             Consumer<Throwable> onError) {
+        startTranscription(sessionId, onFinal, onPartial, onReady, onError, null);
+    }
+
+    /**
+     * 按用户级运行时配置启动识别；rt 为 null 或字段为 null 时回退到系统默认配置。
+     */
+    public void startTranscription(
+            String sessionId,
+            Consumer<String> onFinal,
+            Consumer<String> onPartial,
+            Runnable onReady,
+            Consumer<Throwable> onError,
+            VoiceRuntime.AsrRuntime rt) {
         synchronized (lockForSession(sessionId)) {
-            startTranscriptionLocked(sessionId, onFinal, onPartial, onReady, onError);
+            startTranscriptionLocked(sessionId, onFinal, onPartial, onReady, onError, rt);
         }
     }
 
@@ -183,6 +197,16 @@ public class QwenAsrService {
             Consumer<String> onPartial,
             Runnable onReady,
             Consumer<Throwable> onError) {
+        restartTranscription(sessionId, onFinal, onPartial, onReady, onError, null);
+    }
+
+    public void restartTranscription(
+            String sessionId,
+            Consumer<String> onFinal,
+            Consumer<String> onPartial,
+            Runnable onReady,
+            Consumer<Throwable> onError,
+            VoiceRuntime.AsrRuntime rt) {
         synchronized (lockForSession(sessionId)) {
             log.info("[Session: {}] Restarting DashScope ASR (stop + start)", sessionId);
             stopTranscription(sessionId);
@@ -191,7 +215,7 @@ public class QwenAsrService {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
-            startTranscriptionLocked(sessionId, onFinal, onPartial, onReady, onError);
+            startTranscriptionLocked(sessionId, onFinal, onPartial, onReady, onError, rt);
 
             // Verify reconnection succeeded
             for (int attempt = 0; attempt < 10; attempt++) {
@@ -218,17 +242,32 @@ public class QwenAsrService {
             Consumer<String> onFinal,
             Consumer<String> onPartial,
             Runnable onReady,
-            Consumer<Throwable> onError) {
+            Consumer<Throwable> onError,
+            VoiceRuntime.AsrRuntime rt) {
         if (sessions.containsKey(sessionId)) {
             throw new IllegalStateException("Session already exists: " + sessionId);
         }
 
+        String effUrl = firstNonNull(rt == null ? null : rt.url(), url);
+        String effModel = firstNonNull(rt == null ? null : rt.model(), model);
+        String effApiKey = firstNonNull(rt == null ? null : rt.apiKey(), apiKey);
+        String effLanguage = firstNonNull(rt == null ? null : rt.language(), language);
+        String effFormat = firstNonNull(rt == null ? null : rt.format(), format);
+        Integer effSampleRate = rt != null && rt.sampleRate() != null ? rt.sampleRate() : sampleRate;
+        boolean effTurnDetection = rt != null && rt.enableTurnDetection() != null
+            ? rt.enableTurnDetection() : enableTurnDetection;
+        String effTurnType = firstNonNull(rt == null ? null : rt.turnDetectionType(), turnDetectionType);
+        Float effTurnThreshold = rt != null && rt.turnDetectionThreshold() != null
+            ? rt.turnDetectionThreshold().floatValue() : turnDetectionThreshold;
+        Integer effTurnSilence = rt != null && rt.turnDetectionSilenceDurationMs() != null
+            ? rt.turnDetectionSilenceDurationMs() : turnDetectionSilenceDurationMs;
+
         try {
             // Build OmniRealtimeParam with connection settings
             OmniRealtimeParam param = OmniRealtimeParam.builder()
-                    .model(model)
-                    .url(url)
-                    .apikey(apiKey)
+                    .model(effModel)
+                    .url(effUrl)
+                    .apikey(effApiKey)
                     .build();
 
             final AtomicReference<OmniRealtimeConversation> conversationRef = new AtomicReference<>();
@@ -275,16 +314,16 @@ public class QwenAsrService {
 
                     // Configure session with transcription parameters
                     OmniRealtimeTranscriptionParam transcriptionParam = new OmniRealtimeTranscriptionParam();
-                    transcriptionParam.setLanguage(language);
-                    transcriptionParam.setInputSampleRate(sampleRate);
-                    transcriptionParam.setInputAudioFormat(format);
+                    transcriptionParam.setLanguage(effLanguage);
+                    transcriptionParam.setInputSampleRate(effSampleRate);
+                    transcriptionParam.setInputAudioFormat(effFormat);
 
                     OmniRealtimeConfig config = OmniRealtimeConfig.builder()
                             .modalities(Collections.singletonList(OmniRealtimeModality.TEXT))
-                            .enableTurnDetection(enableTurnDetection)
-                            .turnDetectionType(turnDetectionType)
-                            .turnDetectionThreshold(turnDetectionThreshold)
-                            .turnDetectionSilenceDurationMs(turnDetectionSilenceDurationMs)
+                            .enableTurnDetection(effTurnDetection)
+                            .turnDetectionType(effTurnType)
+                            .turnDetectionThreshold(effTurnThreshold)
+                            .turnDetectionSilenceDurationMs(effTurnSilence)
                             .transcriptionConfig(transcriptionParam)
                             .build();
 
@@ -379,8 +418,8 @@ public class QwenAsrService {
     public void stopTranscription(String sessionId) {
         synchronized (lockForSession(sessionId)) {
             AsrSession session = sessions.remove(sessionId);
-            // Clean up the session lock to prevent memory leak
-            sessionLocks.remove(sessionId);
+            // 注意：不移除 sessionLocks 中的锁对象。锁对象数量与会话数同阶（有界），
+            // 而移除会让后续请求通过 computeIfAbsent 生成新锁对象，与仍在持锁的线程失去互斥。
             if (session == null) {
                 log.warn("[Session: {}] Attempted to stop non-existent session", sessionId);
                 return;
@@ -465,7 +504,12 @@ public class QwenAsrService {
             Consumer<String> onPartial,
             Consumer<Throwable> onError) {
         try {
-            String eventType = message.get("type").getAsString();
+            JsonElement typeElement = message.get("type");
+            if (typeElement == null || typeElement.isJsonNull()) {
+                log.warn("[Session: {}] Ignoring server event without type field", sessionId);
+                return;
+            }
+            String eventType = typeElement.getAsString();
 
             log.trace("[Session: {}] Received event: {}", sessionId, eventType);
 
@@ -481,7 +525,12 @@ public class QwenAsrService {
                 case "conversation.item.input_audio_transcription.completed":
                     // Final transcription result
                     JsonObject transcriptObj = message.getAsJsonObject();
-                    String transcript = transcriptObj.get("transcript").getAsString();
+                    JsonElement transcriptElement = transcriptObj.get("transcript");
+                    if (transcriptElement == null || transcriptElement.isJsonNull()) {
+                        log.warn("[Session: {}] Transcription completed event without transcript, ignore", sessionId);
+                        break;
+                    }
+                    String transcript = transcriptElement.getAsString();
                     String language = transcriptObj.has("language") ?
                             transcriptObj.get("language").getAsString() : "unknown";
                     String emotion = transcriptObj.has("emotion") ?
@@ -685,5 +734,9 @@ public class QwenAsrService {
 
     public void setTurnDetectionSilenceDurationMs(Integer turnDetectionSilenceDurationMs) {
         this.turnDetectionSilenceDurationMs = turnDetectionSilenceDurationMs;
+    }
+
+    private static String firstNonNull(String override, String fallback) {
+        return override != null && !override.isBlank() ? override : fallback;
     }
 }

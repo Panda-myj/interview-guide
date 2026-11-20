@@ -139,7 +139,7 @@ frontend (React)  --REST / SSE / WebSocket-->  app (Spring Boot)
 | **MinIO** | 对象存储（S3 兼容） | 存大文件：简历 PDF/Word、知识库文档、头像 | 仓库 | 兼容 AWS S3 协议，代码用 S3 SDK，可无缝换云上 OSS/COS；9000=API、9001=控制台 |
 | **后端（Spring Boot）** | 业务逻辑核心 | 提供 RESTful API、编排 AI（分析/出题/评估/RAG/语音） | 后厨+店长 | 项目里你掌握的那 80+ Java 文件的所在处 |
 | **前端（React+TS）** | 用户界面 | 所有页面展示与交互，SSE/WebSocket 实现打字机与语音实时效果，Nginx 托管 | 柜台/菜单 | 打包后用 Nginx 托管并提供访问 |
-| **阿里云百炼（千问）** | AI 大脑（外部服务） | 提供三种能力：文本 LLM（对话/分析）、ASR（听懂说话）、TTS（AI 说话） | 外包的大厨 | 项目本身无 AI 能力，需 `.env` 配 `AI_BAILIAN_API_KEY`；可切 DeepSeek/Kimi/GLM |
+| **阿里云百炼（千问）** | AI 大脑（外部服务） | 提供三种能力：文本 LLM（对话/分析）、ASR（听懂说话）、TTS（AI 说话） | 外包的大厨 | 项目本身无 AI 能力，需 `.env` 配 `PROVIDER_DASHSCOPE_API_KEY`；可切 DeepSeek/Kimi/GLM |
 
 ### 回答常见疑问：你要"配置/安装"的东西实际在给谁装
 
@@ -378,7 +378,7 @@ interviewschedule  knowledgebase     ← 完全独立，只依赖 common
 - 红锁 / 事务同步（`TransactionSynchronization` 后置发消息）保证"落库后才有下一步动作"，避免并发状态错乱。
 - 异步评估：`VoiceEvaluateStreamConsumer` 消费评估，避免阻塞语音会话。
 - 限流三件套：`max-per-session`（每秒消息数）、`max-per-ip`（每小时面试数）、`max-concurrent`（全局并发）。
-- 语音相关密钥（`AI_BAILIAN_API_KEY`）只放 `.env`。
+- 语音相关密钥（`PROVIDER_DASHSCOPE_API_KEY`）只放 `.env`。
 
 **你能学到什么：**
 - WebSocket 实时通信
@@ -606,14 +606,14 @@ llmprovider → resume → interviewschedule → knowledgebase → interview →
 
 - **一句话**：`application.yml` 是 Spring 主配置（端口、数据源、业务参数）；`.env` 存敏感密钥（API Key），由脚本/`@PostConstruct` 读进环境变量，**不进 Git**；profile（`application-dev.yml`）按环境切换配置。
 
-- **本项目对应**：所有 `AI_BAILIAN_API_KEY` 等密钥只在 `.env`；`app.ai.default-provider` 在 yml 可切换默认供应商；pgvector 的 `initialize-schema` 仅开发环境开启。
+- **本项目对应**：所有 `PROVIDER_DASHSCOPE_API_KEY` 等密钥只在 `.env`；`app.ai.default-provider` 在 yml 可切换默认供应商；pgvector 的 `initialize-schema` 仅开发环境开启。
 
 - **面试延伸**：为什么密钥不能写进 yml/Jar（`~/.interview-guide/llm-providers.yml` 运行时隔离）；环境变量 vs 配置文件的优先级。
 
   根据 Spring Boot 的配置优先级规则（从高到低）：
 
-  1. **命令行参数** (`java -jar app.jar --AI_BAILIAN_API_KEY=xxx`)
-  2. **系统环境变量** (`export AI_BAILIAN_API_KEY=xxx`) —— **.env 文件通常被脚本读取后注入到这里**
+  1. **命令行参数** (`java -jar app.jar --PROVIDER_DASHSCOPE_API_KEY=xxx`)
+  2. **系统环境变量** (`export PROVIDER_DASHSCOPE_API_KEY=xxx`) —— **.env 文件通常被脚本读取后注入到这里**
   3. Jar 包外部的 `application-{profile}.yml`
   4. Jar 包内部的 `application-{profile}.yml`
   5. Jar 包外部的 `application.yml`

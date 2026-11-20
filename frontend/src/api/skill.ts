@@ -32,7 +32,7 @@ export const skillApi = {
   },
 
   async getSkill(id: string): Promise<SkillDTO> {
-    return request.get<SkillDTO>(`/api/interview/skills/${id}`);
+    return request.get<SkillDTO>(`/api/interview/skills/${encodeURIComponent(id)}`);
   },
 
   async parseJd(jdText: string): Promise<CategoryDTO[]> {

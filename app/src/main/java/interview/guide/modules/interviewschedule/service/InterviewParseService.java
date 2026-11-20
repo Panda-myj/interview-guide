@@ -2,11 +2,12 @@ package interview.guide.modules.interviewschedule.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import interview.guide.common.ai.LlmProviderRegistry;
 import interview.guide.common.ai.PromptSanitizer;
 import interview.guide.common.ai.PromptSecurityConstants;
+import interview.guide.common.exception.BusinessException;
 import interview.guide.modules.interviewschedule.model.CreateInterviewRequest;
 import interview.guide.modules.interviewschedule.model.ParseResponse;
+import interview.guide.modules.llmprovider.service.UserLlmConfigService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
@@ -28,7 +29,7 @@ import java.util.regex.Pattern;
 @RequiredArgsConstructor
 public class InterviewParseService {
 
-    private final LlmProviderRegistry llmProviderRegistry;
+    private final UserLlmConfigService userLlmConfigService;
     private final ObjectMapper objectMapper;
     private final PromptSanitizer promptSanitizer;
     private final Clock clock;
@@ -115,7 +116,7 @@ public class InterviewParseService {
 
         // Step 2: Rule parsing failed, try AI parsing
         log.info("规则解析失败，尝试 AI 解析");
-        result = parseWithAI(rawText, source); // 使用source作为provider参数
+        result = parseWithAI(rawText);
         if (isValidResult(result)) {
             log.info("AI 解析成功");
             return new ParseResponse(true, result, 0.8, "ai", "AI 解析成功");
@@ -232,10 +233,10 @@ public class InterviewParseService {
 
             StringBuilder meetingLink = new StringBuilder();
             if (meetingIdMatcher.find()) {
-                meetingLink.append("会议号: ").append(meetingIdMatcher.group());
+                meetingLink.append("会议号: ").append(meetingIdMatcher.group(1));
             }
             if (passwordMatcher.find()) {
-                meetingLink.append(" 密码: ").append(passwordMatcher.group());
+                meetingLink.append(" 密码: ").append(passwordMatcher.group(1));
             }
             if (meetingLink.length() > 0) {
                 request.setMeetingLink(meetingLink.toString());
@@ -297,7 +298,7 @@ public class InterviewParseService {
 
     // ========== AI Parsing ==========
 
-    private CreateInterviewRequest parseWithAI(String rawText, String provider) {
+    private CreateInterviewRequest parseWithAI(String rawText) {
         try {
             String currentDate = LocalDateTime.now(clock).format(DateTimeFormatter.ISO_LOCAL_DATE);
             String safeRawText = promptSanitizer.sanitize(rawText);
@@ -305,7 +306,7 @@ public class InterviewParseService {
                 PromptSecurityConstants.DATA_BOUNDARY_INSTRUCTION + "\n" +
                 promptSanitizer.wrapWithDelimiters("parse-input", safeRawText));
 
-            ChatClient chatClient = llmProviderRegistry.getChatClientOrDefault(provider);
+            ChatClient chatClient = userLlmConfigService.requireCurrentUserChatClient();
 
             String content = chatClient.prompt()
                     .user(prompt)
@@ -387,6 +388,9 @@ public class InterviewParseService {
             log.info("AI 解析成功: {}", request.getCompanyName());
             return request;
 
+        } catch (BusinessException e) {
+            // 未配置个人大模型：向上抛出明确提示，不要静默降级为“解析失败”
+            throw e;
         } catch (Exception e) {
             log.error("AI 解析异常: {}", e.getMessage(), e);
             return null;
@@ -422,7 +426,12 @@ public class InterviewParseService {
         Matcher matcher = ROUND_NUMBER_PATTERN.matcher(text);
         if (matcher.find()) {
             String num = matcher.group();
-            return CHINESE_NUMBERS.getOrDefault(num, Integer.parseInt(num.replaceAll("\\D", "")));
+            // getOrDefault 的默认值参数会先求值，中文数字（如「二」）走 parseInt("") 会抛异常。
+            Integer chineseNumber = CHINESE_NUMBERS.get(num);
+            if (chineseNumber != null) {
+                return chineseNumber;
+            }
+            return num.matches("\\d+") ? Integer.parseInt(num) : 1;
         }
 
         return 1;

@@ -1,7 +1,6 @@
 package interview.guide.modules.interview.service;
 
 import interview.guide.common.constant.CommonConstants.InterviewDefaults;
-import interview.guide.common.ai.LlmProviderRegistry;
 import interview.guide.common.exception.BusinessException;
 import interview.guide.common.exception.ErrorCode;
 import interview.guide.common.model.AsyncTaskStatus;
@@ -21,6 +20,7 @@ import interview.guide.modules.interview.model.SubmitAnswerRequest;
 import interview.guide.modules.interview.model.SubmitAnswerResponse;
 import interview.guide.modules.interview.model.InterviewSessionDTO.SessionStatus;
 import interview.guide.modules.interview.repository.InterviewSessionRepository;
+import interview.guide.modules.llmprovider.service.UserLlmConfigService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
@@ -50,7 +50,7 @@ public class InterviewSessionService {
     private final InterviewSessionCache sessionCache;
     private final ObjectMapper objectMapper;
     private final EvaluateStreamProducer evaluateStreamProducer;
-    private final LlmProviderRegistry llmProviderRegistry;
+    private final UserLlmConfigService userLlmConfigService;
     private final CurrentUserService currentUserService;
     private final InterviewSessionRepository sessionRepository;
     private final TransactionalExecutor transactionalExecutor;
@@ -93,9 +93,8 @@ public class InterviewSessionService {
         List<HistoricalQuestion> historicalQuestions =
             persistenceService.getHistoricalQuestions(skillId, request.resumeId());
 
-        // 基于 Skill 生成面试问题
+        // 基于 Skill 生成面试问题（使用当前用户自己的大模型配置）
         List<InterviewQuestionDTO> questions = questionService.generateQuestionsBySkill(
-            request.llmProvider(),
             skillId,
             difficulty,
             request.resumeText(),
@@ -116,12 +115,13 @@ public class InterviewSessionService {
             SessionStatus.CREATED
         );
 
-        // 保存到数据库
+        // 保存到数据库；创建阶段的持久化失败不阻断会话返回（Redis 缓存仍可用），
+        // 但必须保留完整异常堆栈便于排查，避免静默降级
         try {
             persistenceService.saveSession(sessionId, request.resumeId(),
                 questions.size(), questions, request.llmProvider(), skillId, difficulty);
         } catch (Exception e) {
-            log.warn("保存面试会话到数据库失败: {}", e.getMessage());
+            log.error("保存面试会话到数据库失败: sessionId={}, resumeId={}", sessionId, request.resumeId(), e);
         }
 
         return new InterviewSessionDTO(
@@ -492,8 +492,11 @@ public class InterviewSessionService {
                     List.of(InterviewSessionEntity.SessionStatus.CREATED,
                         InterviewSessionEntity.SessionStatus.IN_PROGRESS)));
         } catch (Exception e) {
-            log.warn("暂存答案到数据库失败: sessionId={}, questionIndex={}",
+            // 与 persistSubmittedAnswer 的失败契约对齐：持久化失败必须抛出业务异常，
+            // 避免“答案未落库但用户看到成功”的假成功
+            log.error("暂存答案到数据库失败: sessionId={}, questionIndex={}",
                 request.sessionId(), index, e);
+            throw new BusinessException(ErrorCode.INTERNAL_ERROR, "暂存答案失败，请稍后重试");
         }
 
         log.info("会话 {} 暂存答案: 问题{}", request.sessionId(), index);
@@ -687,10 +690,12 @@ public class InterviewSessionService {
         List<InterviewQuestionDTO> questions = session.getQuestions(objectMapper);
 
         try {
-            ChatClient chatClient = llmProviderRegistry.getChatClientOrDefault(entity.getLlmProvider());
+            ChatClient chatClient = userLlmConfigService.requireChatClientForUser(
+                entity.getOwnerUser().getId());
             InterviewReportDTO report = evaluationService.evaluateInterview(
                 chatClient,
                 sessionId,
+                entity.getSkillId(),
                 session.getResumeText(),
                 questions
             );

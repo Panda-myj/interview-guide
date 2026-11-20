@@ -1,7 +1,6 @@
 package interview.guide.modules.interview.listener;
 
 import interview.guide.common.async.AbstractStreamConsumer;
-import interview.guide.common.ai.LlmProviderRegistry;
 import interview.guide.common.constant.AsyncTaskStreamConstants;
 import interview.guide.common.model.AsyncTaskStatus;
 import interview.guide.infrastructure.redis.RedisService;
@@ -13,6 +12,7 @@ import interview.guide.modules.interview.repository.InterviewSessionRepository;
 import interview.guide.modules.interview.service.AnswerEvaluationService;
 import interview.guide.modules.interview.service.InterviewPersistenceService;
 import interview.guide.modules.interview.service.InterviewSessionService;
+import interview.guide.modules.llmprovider.service.UserLlmConfigService;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.stream.StreamMessageId;
 import org.springframework.ai.chat.client.ChatClient;
@@ -36,7 +36,7 @@ public class EvaluateStreamConsumer extends AbstractStreamConsumer<EvaluateStrea
     private final AnswerEvaluationService evaluationService;
     private final InterviewPersistenceService persistenceService;
     private final ObjectMapper objectMapper;
-    private final LlmProviderRegistry llmProviderRegistry;
+    private final UserLlmConfigService userLlmConfigService;
     private final InterviewSessionService sessionService;
 
     public EvaluateStreamConsumer(
@@ -45,7 +45,7 @@ public class EvaluateStreamConsumer extends AbstractStreamConsumer<EvaluateStrea
         AnswerEvaluationService evaluationService,
         InterviewPersistenceService persistenceService,
         ObjectMapper objectMapper,
-        LlmProviderRegistry llmProviderRegistry,
+        UserLlmConfigService userLlmConfigService,
         InterviewSessionService sessionService
     ) {
         super(redisService);
@@ -53,7 +53,7 @@ public class EvaluateStreamConsumer extends AbstractStreamConsumer<EvaluateStrea
         this.evaluationService = evaluationService;
         this.persistenceService = persistenceService;
         this.objectMapper = objectMapper;
-        this.llmProviderRegistry = llmProviderRegistry;
+        this.userLlmConfigService = userLlmConfigService;
         this.sessionService = sessionService;
     }
 
@@ -151,12 +151,13 @@ public class EvaluateStreamConsumer extends AbstractStreamConsumer<EvaluateStrea
             }
         }
 
-        // 获取 LLM 客户端
-        String provider = session.getLlmProvider();
-        ChatClient chatClient = llmProviderRegistry.getChatClientOrDefault(provider);
+        // 获取 LLM 客户端：使用会话归属用户自己的大模型配置
+        ChatClient chatClient = userLlmConfigService.requireChatClientForUser(
+            session.getOwnerUser().getId());
 
         String resumeText = session.getResume() != null ? session.getResume().getResumeText() : "";
-        InterviewReportDTO report = evaluationService.evaluateInterview(chatClient, sessionId, resumeText, questions);
+        InterviewReportDTO report = evaluationService.evaluateInterview(
+            chatClient, sessionId, session.getSkillId(), resumeText, questions);
         persistenceService.saveReport(sessionId, report);
     }
 

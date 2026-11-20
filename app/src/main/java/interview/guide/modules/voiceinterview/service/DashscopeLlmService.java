@@ -1,7 +1,8 @@
 package interview.guide.modules.voiceinterview.service;
 
-import interview.guide.common.ai.LlmProviderRegistry;
 import interview.guide.common.ai.PromptSanitizer;
+import interview.guide.common.exception.BusinessException;
+import interview.guide.modules.llmprovider.service.UserLlmConfigService;
 import interview.guide.modules.resume.model.ResumeEntity;
 import interview.guide.modules.resume.repository.ResumeRepository;
 import interview.guide.modules.voiceinterview.config.VoiceInterviewProperties;
@@ -24,20 +25,21 @@ public class DashscopeLlmService {
 
     private static final String TERMINAL_PUNCTUATION = "。！？；!?;.";
 
-    private final LlmProviderRegistry llmProviderRegistry;
+    private final UserLlmConfigService userLlmConfigService;
     private final VoiceInterviewPromptService promptService;
     private final ResumeRepository resumeRepository;
     private final VoiceInterviewProperties voiceInterviewProperties;
     private final PromptSanitizer promptSanitizer;
+    private final AtomicInteger llmFailureCounter = new AtomicInteger(0);
 
     public String chat(String userInput, VoiceInterviewSessionEntity session, List<String> conversationHistory) {
         try {
             PromptContext promptContext = buildPromptContext(userInput, session, conversationHistory);
 
-            String provider = session.getLlmProvider();
-            log.info("[VoiceInterview] Session {} using LLM provider: {}", session.getId(), provider);
+            log.info("[VoiceInterview] Session {} using user's own LLM config", session.getId());
 
-            ChatClient chatClient = llmProviderRegistry.getVoiceChatClient(provider);
+            ChatClient chatClient = userLlmConfigService.requireVoiceChatClientForUser(
+                session.getOwnerUser().getId());
 
             ChatClient.CallResponseSpec response = chatClient.prompt()
                 .system(promptContext.systemPrompt())
@@ -52,8 +54,16 @@ public class DashscopeLlmService {
 
             return optimized;
 
+        } catch (BusinessException e) {
+            // 未配置个人大模型等业务提示直接作为回复下发，让用户看到明确的引导文案
+            log.warn("[VoiceInterview] LLM business failure for session {}: {}", session.getId(), e.getMessage());
+            return e.getMessage();
         } catch (Exception e) {
+            // 保留现有兜底文案行为（调用方会作为 AI 回复下发），但失败必须显式计数告警，
+            // 避免“错误当回复”被静默持久化而无任何可观测信号
             log.error("LLM chat error for session {}: {}", session.getId(), e.getMessage(), e);
+            log.warn("[VoiceInterview] LLM fallback engaged for session {}: failuresSoFar={}, reason={}",
+                session.getId(), llmFailureCounter.incrementAndGet(), e.getMessage());
             return mapLlmErrorToUserMessage(e);
         }
     }
@@ -73,10 +83,10 @@ public class DashscopeLlmService {
                                        List<String> conversationHistory) {
         try {
             PromptContext promptContext = buildPromptContext(userInput, session, conversationHistory);
-            String provider = session.getLlmProvider();
-            log.info("[VoiceInterview] Session {} using LLM provider (sentence stream): {}", session.getId(), provider);
+            log.info("[VoiceInterview] Session {} using user's own LLM config (sentence stream)", session.getId());
 
-            ChatClient chatClient = llmProviderRegistry.getVoiceChatClient(provider);
+            ChatClient chatClient = userLlmConfigService.requireVoiceChatClientForUser(
+                session.getOwnerUser().getId());
             StringBuilder raw = new StringBuilder();
             AtomicLong lastEmitNanos = new AtomicLong(System.nanoTime());
             AtomicInteger lastEmitLength = new AtomicInteger(0);
@@ -148,8 +158,15 @@ public class DashscopeLlmService {
             log.info("LLM sentence stream response for session {}: {}", session.getId(),
                 optimized.substring(0, Math.min(100, optimized.length())));
             return optimized;
+        } catch (BusinessException e) {
+            // 未配置个人大模型等业务提示直接作为回复下发，让用户看到明确的引导文案
+            log.warn("[VoiceInterview] LLM business failure for session {}: {}", session.getId(), e.getMessage());
+            return e.getMessage();
         } catch (Exception e) {
+            // 同 chat()：保留兜底文案行为，但失败必须显式计数告警
             log.error("LLM sentence stream error for session {}: {}", session.getId(), e.getMessage(), e);
+            log.warn("[VoiceInterview] LLM fallback engaged for session {}: failuresSoFar={}, reason={}",
+                session.getId(), llmFailureCounter.incrementAndGet(), e.getMessage());
             return mapLlmErrorToUserMessage(e);
         }
     }

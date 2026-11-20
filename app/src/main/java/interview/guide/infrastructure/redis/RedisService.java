@@ -195,7 +195,11 @@ public class RedisService {
                 try {
                     return operation.execute();
                 } finally {
-                    lock.unlock();
+                    // leaseTime 到期后锁可能已自动释放，unlock 前必须校验持锁状态，
+                    // 否则 IllegalMonitorStateException 会掩盖 operation 的原始异常
+                    if (lock.isHeldByCurrentThread()) {
+                        lock.unlock();
+                    }
                 }
             }
             throw new BusinessException(ErrorCode.INTERNAL_ERROR, "获取锁失败: " + lockKey);

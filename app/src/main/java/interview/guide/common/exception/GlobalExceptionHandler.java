@@ -80,8 +80,9 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(IllegalArgumentException.class)
     @ResponseStatus(HttpStatus.OK)
     public Result<Void> handleIllegalArgumentException(IllegalArgumentException e) {
-        log.warn("非法参数: {}", e.getMessage());
-        return Result.error(ErrorCode.BAD_REQUEST, e.getMessage());
+        // 库/框架抛出的 IllegalArgumentException 可能携带内部路径、URL、SQL 片段，不回显给客户端。
+        log.warn("非法参数: {}", e.getMessage(), e);
+        return Result.error(ErrorCode.BAD_REQUEST, "请求参数不合法");
     }
     
     /**

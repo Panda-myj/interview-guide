@@ -45,7 +45,8 @@ export function useInterviewSchedule() {
 
   const deleteInterview = async (id: number): Promise<void> => {
     await interviewScheduleApi.delete(id);
-    setInterviews(interviews.filter(i => i.id !== id));
+    // 用函数式更新，避免连续删除或与 fetchInterviews 并发时用旧快照覆盖已删除项。
+    setInterviews(prev => prev.filter(i => i.id !== id));
   };
 
   const updateStatus = async (id: number, status: InterviewStatus): Promise<InterviewSchedule> => {

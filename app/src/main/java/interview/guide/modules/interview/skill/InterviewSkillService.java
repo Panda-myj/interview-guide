@@ -1,6 +1,6 @@
 package interview.guide.modules.interview.skill;
 
-import interview.guide.common.ai.LlmProviderRegistry;
+import interview.guide.modules.llmprovider.service.UserLlmConfigService;
 import interview.guide.common.ai.PromptSanitizer;
 import interview.guide.common.ai.PromptSecurityConstants;
 import interview.guide.common.ai.StructuredOutputInvoker;
@@ -56,7 +56,7 @@ public class InterviewSkillService {
     private static final int MAX_EVALUATION_REFERENCE_SECTION_CHARS = 6000;
     private static final int MAX_SINGLE_REFERENCE_CHARS = 3000;
 
-    private final LlmProviderRegistry llmProviderRegistry;
+    private final UserLlmConfigService userLlmConfigService;
     private final StructuredOutputInvoker structuredOutputInvoker;
     private final BeanOutputConverter<CategoryListDTO> jdOutputConverter;
     private final PromptTemplate jdSystemPromptTemplate;
@@ -77,11 +77,11 @@ public class InterviewSkillService {
 
     record RefMapping(String ref, boolean shared, String sourceSkillId) {}
 
-    public InterviewSkillService(LlmProviderRegistry llmProviderRegistry,
+    public InterviewSkillService(UserLlmConfigService userLlmConfigService,
                                  StructuredOutputInvoker structuredOutputInvoker,
                                  ResourceLoader resourceLoader,
                                  PromptSanitizer promptSanitizer) throws IOException {
-        this.llmProviderRegistry = llmProviderRegistry;
+        this.userLlmConfigService = userLlmConfigService;
         this.structuredOutputInvoker = structuredOutputInvoker;
         this.resourceLoader = resourceLoader;
         this.promptSanitizer = promptSanitizer;
@@ -186,7 +186,7 @@ public class InterviewSkillService {
 
         log.info("开始解析 JD，长度: {}", jdText.length());
 
-        ChatClient chatClient = llmProviderRegistry.getDefaultChatClient();
+        ChatClient chatClient = userLlmConfigService.requireCurrentUserChatClient();
         String systemPrompt = jdSystemPromptTemplate.render(Map.of(
             "referenceFileList", cachedReferenceFileList
         )) + "\n\n" + jdOutputConverter.getFormat();
@@ -255,7 +255,8 @@ public class InterviewSkillService {
         List<SkillCategoryDTO> normalCats = new ArrayList<>();
 
         for (SkillCategoryDTO cat : categories) {
-            switch (cat.priority()) {
+            // LLM 返回的 priority 可能为 null，switch 会直接抛 NPE。
+            switch (cat.priority() == null ? "" : cat.priority()) {
                 case "ALWAYS_ONE" -> alwaysOneCats.add(cat);
                 case "CORE" -> coreCats.add(cat);
                 default -> normalCats.add(cat);

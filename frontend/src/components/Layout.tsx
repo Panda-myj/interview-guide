@@ -102,13 +102,13 @@ export default function Layout() {
         { id: 'chat', path: ROUTES.knowledgebaseChat, label: '问答助手', icon: MessageSquare, description: '基于知识库问答' },
       ],
     },
-    ...(isAdmin ? [{
+    {
       id: 'system',
       title: '系统',
       items: [
-        { id: 'settings', path: ROUTES.settings, label: '设置', icon: Settings, description: '管理模型和语音服务' },
+        { id: 'settings', path: ROUTES.settings, label: '设置', icon: Settings, description: '配置我的大模型服务' },
       ],
-    }] : []),
+    },
   ];
 
   // 分组归属集中在 constants/routes.ts，Layout 只做调用

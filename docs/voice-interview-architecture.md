@@ -11,7 +11,7 @@ AI语音面试系统是一个实时语音交互的智能面试平台，集成了
 - **ASR 准确率**: ~95%+（提升 5%+）
 - **ASR 断句延迟**: 400ms（减少 50%）
 - **TTS 可用性**: HTTP TTS 失败可快速上报，并由浏览器中文语音兜底
-- **配置简化**: 从 9 个环境变量减少到 2 个（统一使用 `AI_BAILIAN_API_KEY`）
+- **配置简化**: 从 9 个环境变量减少到 2 个（统一使用 `PROVIDER_DASHSCOPE_API_KEY`）
 
 ## 🏗️ 系统架构图
 
@@ -434,8 +434,8 @@ graph TB
 ### 必需配置
 ```yaml
 # 统一 API Key（LLM + ASR + TTS 共用）
-ai.bailian.api-key: ${AI_BAILIAN_API_KEY}
-spring.ai.openai.api-key: ${AI_BAILIAN_API_KEY}
+ai.bailian.api-key: ${PROVIDER_DASHSCOPE_API_KEY}
+spring.ai.openai.api-key: ${PROVIDER_DASHSCOPE_API_KEY}
 
 # AI 模型配置
 ai.model: qwen3.5-flash  # 可选: qwen3.5-plus, qwen-max 等
@@ -453,7 +453,7 @@ app:
       asr:
         url: wss://dashscope.aliyuncs.com/api-ws/v1/realtime
         model: qwen3-asr-flash-realtime
-        api-key: ${AI_BAILIAN_API_KEY}
+        api-key: ${PROVIDER_DASHSCOPE_API_KEY}
         language: zh
         format: pcm
         sample-rate: 16000
@@ -465,7 +465,7 @@ app:
       tts:
         url: wss://dashscope.aliyuncs.com/api-ws/v1/realtime
         model: qwen3-tts-flash
-        api-key: ${AI_BAILIAN_API_KEY}
+        api-key: ${PROVIDER_DASHSCOPE_API_KEY}
         voice: Cherry
         format: pcm
         sample-rate: 16000

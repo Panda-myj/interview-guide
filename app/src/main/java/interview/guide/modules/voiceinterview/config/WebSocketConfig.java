@@ -24,7 +24,11 @@ public class WebSocketConfig implements WebSocketConfigurer {
     public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
         registry.addHandler(voiceInterviewWebSocketHandler, "/ws/voice-interview/{sessionId}")
                 .addInterceptors(handshakeInterceptor)
-                .setAllowedOrigins(corsProperties.getAllowedOrigins().split(","));
+                .setAllowedOrigins(java.util.Arrays.stream(
+                        corsProperties.getAllowedOrigins().split(","))
+                    .map(String::trim)
+                    .filter(origin -> !origin.isEmpty())
+                    .toArray(String[]::new));
     }
 
     @Bean

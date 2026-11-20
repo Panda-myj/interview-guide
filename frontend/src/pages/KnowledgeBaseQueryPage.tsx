@@ -59,8 +59,19 @@ export default function KnowledgeBaseQueryPage({ onBack, onUpload }: KnowledgeBa
   // refs
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const rafRef = useRef<number>();
+  // 列表请求序号：搜索/排序切换时旧响应晚到不应覆盖新结果
+  const listRequestSeqRef = useRef(0);
 
   const [, startTransition] = useTransition();
+
+  // 卸载时取消未触发的 requestAnimationFrame，避免对已卸载组件执行 setState
+  useEffect(() => {
+    return () => {
+      if (rafRef.current) {
+        cancelAnimationFrame(rafRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     loadKnowledgeBases();
@@ -74,15 +85,21 @@ export default function KnowledgeBaseQueryPage({ onBack, onUpload }: KnowledgeBa
   }, [sortBy]);
 
   const loadKnowledgeBases = async () => {
+    const seq = ++listRequestSeqRef.current;
     setLoadingList(true);
     try {
       // 问答助手只显示向量化完成的知识库
       const list = await knowledgeBaseApi.getAllKnowledgeBases(sortBy, 'COMPLETED');
+      if (seq !== listRequestSeqRef.current) return;
       setKnowledgeBases(list);
     } catch (err) {
-      console.error('加载知识库列表失败', err);
+      if (seq === listRequestSeqRef.current) {
+        console.error('加载知识库列表失败', err);
+      }
     } finally {
-      setLoadingList(false);
+      if (seq === listRequestSeqRef.current) {
+        setLoadingList(false);
+      }
     }
   };
 
@@ -91,14 +108,20 @@ export default function KnowledgeBaseQueryPage({ onBack, onUpload }: KnowledgeBa
       loadKnowledgeBases();
       return;
     }
+    const seq = ++listRequestSeqRef.current;
     setLoadingList(true);
     try {
       const list = await knowledgeBaseApi.search(searchKeyword.trim());
+      if (seq !== listRequestSeqRef.current) return;
       setKnowledgeBases(list);
     } catch (err) {
-      console.error('搜索知识库失败', err);
+      if (seq === listRequestSeqRef.current) {
+        console.error('搜索知识库失败', err);
+      }
     } finally {
-      setLoadingList(false);
+      if (seq === listRequestSeqRef.current) {
+        setLoadingList(false);
+      }
     }
   };
 

@@ -1,6 +1,6 @@
 package interview.guide.modules.interview.service;
 
-import interview.guide.common.ai.LlmProviderRegistry;
+import interview.guide.modules.llmprovider.service.UserLlmConfigService;
 import interview.guide.common.exception.BusinessException;
 import interview.guide.common.exception.ErrorCode;
 import interview.guide.common.model.AsyncTaskStatus;
@@ -60,7 +60,7 @@ class InterviewSessionServiceStateMachineTest {
     @Mock
     private EvaluateStreamProducer evaluateStreamProducer;
     @Mock
-    private LlmProviderRegistry llmProviderRegistry;
+    private UserLlmConfigService userLlmConfigService;
     @Mock
     private CurrentUserService currentUserService;
     @Mock
@@ -80,7 +80,7 @@ class InterviewSessionServiceStateMachineTest {
             sessionCache,
             objectMapper,
             evaluateStreamProducer,
-            llmProviderRegistry,
+            userLlmConfigService,
             currentUserService,
             sessionRepository,
             new TransactionalExecutor()
@@ -228,7 +228,8 @@ class InterviewSessionServiceStateMachineTest {
 
             assertThat(report.overallScore()).isEqualTo(88);
             assertThat(report.overallFeedback()).isEqualTo("表现不错");
-            verify(evaluationService, never()).evaluateInterview(any(), anyString(), anyString(), any());
+            verify(evaluationService, never()).evaluateInterview(
+                any(), anyString(), anyString(), anyString(), any());
         }
 
         @Test

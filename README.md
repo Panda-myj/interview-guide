@@ -38,7 +38,7 @@ InterviewGuide 是一个集成了简历分析、模拟面试（文字 + 语音�
 | MapStruct             | 1.6.3 | 对象映射                      |
 | SpringDoc OpenAPI     | 3.0.2 | API 接口文档                  |
 | DashScope SDK         | 2.23.3 | 语音识别/合成（Qwen3 ASR/HTTP TTS）|
-| AWS S3 SDK            | 2.29.51 | S3 兼容对象存储（MinIO/RustFS）|
+| AWS S3 SDK            | 2.29.51 | S3 兼容对象存储（RustFS）|
 | WebSocket             | -     | 语音面试实时双向通信          |
 | Gradle                | 8.14  | 构建工具                      |
 
@@ -245,7 +245,7 @@ interview-guide/
 │   ├── package.json
 │   └── vite.config.ts
 │
-├── docker-compose.yml                # 完整部署：前端 + 后端 + PostgreSQL + Redis + MinIO
+├── docker-compose.yml                # 完整部署：前端 + 后端 + PostgreSQL + Redis + RustFS + storage-init
 ├── docker-compose.dev.yml            # 本地开发依赖：PostgreSQL + Redis + RustFS
 ├── docs/                             # 架构设计与改造记录
 ├── .env.example                      # 环境变量示例
@@ -272,52 +272,61 @@ cd interview-guide
 
 ### 2. 配置环境变量
 
-推荐复制 `.env.example` 为 `.env`，后端 `bootRun` 会自动读取根目录 `.env`。最少需要填写 `AI_BAILIAN_API_KEY`，用于 DashScope 文本模型、ASR 和 TTS：
+推荐复制 `.env.example` 为 `.env`，后端 `bootRun` 会自动读取根目录 `.env`。最少需要填写 `PROVIDER_DASHSCOPE_API_KEY`，用于 DashScope 文本模型、ASR 和 TTS：
 
 ```bash
 cp .env.example .env
 
 # 编辑 .env
-# AI_BAILIAN_API_KEY=your_dashscope_api_key
-# AI_MODEL=qwen3.5-flash
+# PROVIDER_DASHSCOPE_API_KEY=your_dashscope_api_key
+# PROVIDER_DASHSCOPE_MODEL=qwen3.5-flash
 ```
 
 如果你更习惯通过 shell 环境变量注入，也可以这样设置：
 
 ```bash
 # macOS / Linux（zsh）
-echo 'export AI_BAILIAN_API_KEY=your_api_key' >> ~/.zshrc
+echo 'export PROVIDER_DASHSCOPE_API_KEY=your_api_key' >> ~/.zshrc
 source ~/.zshrc
 
 # Linux（bash）
-echo 'export AI_BAILIAN_API_KEY=your_api_key' >> ~/.bashrc
+echo 'export PROVIDER_DASHSCOPE_API_KEY=your_api_key' >> ~/.bashrc
 source ~/.bashrc
 ```
 
-### 3. 启动依赖服务（可选）
+### 3. 启动依赖服务（开发模式必需）
 
-项目提供了 `docker-compose.dev.yml`，可一键启动 PostgreSQL、Redis、RustFS（S3 兼容存储）三个依赖：
-这里需要用sudo docker ...，docker连接的是宿主机windows上的docker desktop
+`docker-compose.dev.yml` 默认**只在容器网络内暴露** PostgreSQL / Redis / RustFS。宿主机用 `./gradlew :app:bootRun` 直连时，必须叠加 `docker-compose.dev.local.yml` 把端口映射到宿主机：
+
 ```bash
-# 启动依赖服务
-docker compose -f docker-compose.dev.yml up -d
+# 启动依赖服务（含宿主机端口映射，供 bootRun 使用）
+docker compose -f docker-compose.dev.yml -f docker-compose.dev.local.yml up -d
 
-# 停止依赖服务
-docker compose -f docker-compose.dev.yml down
+# 查看状态 / 日志
+docker compose -f docker-compose.dev.yml -f docker-compose.dev.local.yml ps
+docker compose -f docker-compose.dev.yml -f docker-compose.dev.local.yml logs -f
 
-# 停止并清除数据
-docker compose -f docker-compose.dev.yml down -v
+# 停止（保留数据卷）
+docker compose -f docker-compose.dev.yml -f docker-compose.dev.local.yml down
+
+# 停止并清除数据卷（会删除所有本地数据，谨慎）
+docker compose -f docker-compose.dev.yml -f docker-compose.dev.local.yml down -v
 ```
 
-启动后默认账号：
+映射后的地址：
 
-| 服务         | 地址             | 账号            | 密码            |
-| ------------ | ---------------- | --------------- | --------------- |
-| PostgreSQL   | `localhost:5432` | `postgres`      | `123456`        |
-| Redis        | `localhost:6379` | -               | -               |
-| RustFS 控制台 | `localhost:9001` | `rustfsadmin`   | `rustfsadmin`   |
+| 服务 | 宿主机地址 | 容器内地址 | 账号 | 密码 |
+| --- | --- | --- | --- | --- |
+| PostgreSQL | `localhost:5432` | `postgres:5432` | `postgres` | `.env` 的 `POSTGRES_PASSWORD` |
+| Redis | `localhost:6380` | `redis:6379` | - | - |
+| RustFS API | `localhost:9000` | `rustfs:9000` | `RUSTFS_ACCESS_KEY` | `RUSTFS_SECRET_KEY` |
+| RustFS 控制台 | `localhost:9001` | `rustfs:9001` | 同上 | 同上 |
 
-> **注意**：应用启动时会自动检查并创建 `interview-guide` Bucket。使用 `docker-compose.dev.yml` + `:app:bootRun` 时，请确保 `.env` 中的 `APP_STORAGE_ACCESS_KEY` / `APP_STORAGE_SECRET_KEY` 与 RustFS 账号一致，例如都设为 `rustfsadmin`。如果本地已有 MinIO 或其他 S3 兼容存储，也可以直接使用，在 `.env` 中修改 `APP_STORAGE_*` 配置即可。
+> **常见启动失败**：只运行 `docker compose -f docker-compose.dev.yml up -d`（不带 local override）时宿主机端口不开放，`bootRun` 会在 Flyway 阶段报 `Connection to localhost:5432 refused`；若 `.env` 的 `REDIS_HOST` 仍写容器服务名 `redis`，宿主机也无法解析。参见 `docs/Q&A.md` Q14。
+>
+> 5432 / 6380 / 9000 是给宿主机 `bootRun` 用的；容器全栈运行时由 compose 显式注入服务名，`.env` 里的这些值不会覆盖 compose 的 `environment`。
+
+> **注意**：开发 profile 下应用启动时会自动检查并创建 `interview-guide` Bucket（`auto-create-bucket` 默认 true）；**生产 profile 禁止此行为**，Bucket 由 `storage-init` 容器创建。`bootRun` 时请确保 `.env` 中的 `APP_STORAGE_ACCESS_KEY` / `APP_STORAGE_SECRET_KEY` 与 RustFS 账号一致（默认 `rustfsadmin`），`APP_STORAGE_ENDPOINT` 写宿主机可达的 `http://localhost:9000`。`bootRun` 注入 `.env` 时**不做 `${...}` 变量插值**，这几项必须写实际值。
 
 > **IDEA Docker Debug 提示**：如果在 macOS 上使用 IntelliJ IDEA 的 Docker 调试方式启动后端，遇到 `mounts denied: The path /Applications/IntelliJ IDEA.app/Contents/lib is not shared from the host`，请在 Docker Desktop 的 `Settings -> Resources -> File Sharing` 中加入 `/Applications/IntelliJ IDEA.app/Contents/lib`（或整个 `/Applications/IntelliJ IDEA.app`）以及当前项目目录，然后重启 Docker/IDEA 后再运行。普通 `./gradlew :app:bootRun` 和 `docker compose` 启动不需要这个额外共享路径。
 
@@ -356,7 +365,6 @@ ALIYUN_SMS_ACCESS_KEY_ID=
 ALIYUN_SMS_ACCESS_KEY_SECRET=
 ALIYUN_SMS_SIGN_NAME=
 ALIYUN_SMS_LOGIN_CODE_TEMPLATE=
-ALIYUN_SMS_LOGIN_ALERT_TEMPLATE=
 ```
 
 本地 Mock 模式（`APP_AUTH_SMS_PROVIDER=mock`）首次启动会执行 `V9__consolidate_mock_admin_ownership.sql`（Flyway 每个版本只执行一次）：
@@ -371,7 +379,7 @@ ALIYUN_SMS_LOGIN_ALERT_TEMPLATE=
 
 本项目提供了完整的 Docker 支持，可以一键启动所有服务（前后端、数据库、中间件）。
 
-Docker Compose 编排了 6 个服务：PostgreSQL（pgvector）、Redis、MinIO（S3 兼容存储）、MinIO Bucket 初始化、Spring Boot 后端、React 前端（Nginx）。数据通过 Docker 命名卷持久化，`docker-compose down` 不会丢失数据。
+Docker Compose 编排了 6 个服务：PostgreSQL（pgvector）、Redis、RustFS（S3 兼容存储）、RustFS Bucket 初始化、Spring Boot 后端、React 前端（Nginx）。数据通过 Docker 命名卷持久化，`docker-compose down` 不会丢失数据。
 
 ### 1. 前置准备
 
@@ -382,7 +390,7 @@ Docker Compose 编排了 6 个服务：PostgreSQL（pgvector）、Redis、MinIO�
 
 在项目根目录下执行：
 
-`.env.example` 中的 PostgreSQL、Redis、MinIO 已与 `docker-compose.yml` 对齐（数据库用户 `postgres` / 密码 `password`，MinIO `minioadmin` / `minioadmin`）。复制为 `.env` 后主要填写 `AI_BAILIAN_API_KEY`；若你曾在旧版本中使用过不同的库密码或对象存储密钥，请同步修改 `.env`，必要时重建 Postgres 卷以免旧数据与密码不一致。
+`.env.example` 中的 PostgreSQL、Redis、RustFS 已与 `docker-compose.yml` 对齐（数据库用户 `postgres`；对象存储凭据由 `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY` 统一提供，示例值为 `rustfsadmin` / `rustfsadmin`）。复制为 `.env` 后主要填写 `PROVIDER_DASHSCOPE_API_KEY`；若你曾在旧版本中使用过不同的库密码或对象存储密钥，请同步修改 `.env`，必要时重建 Postgres 卷以免旧数据与密码不一致。
 
 ```bash
 # 1. 复制环境变量配置文件
@@ -390,9 +398,9 @@ cp .env.example .env
 
 # 2. 编辑 .env 文件，填入 AI 配置
 # vim .env
-# 必填：AI_BAILIAN_API_KEY=your_key_here
+# 必填：PROVIDER_DASHSCOPE_API_KEY=your_key_here
 # 必填：APP_AI_CONFIG_ENCRYPTION_KEY=your_random_long_secret
-# 可选：AI_MODEL=qwen3.5-flash   # 默认值为 qwen3.5-flash
+# 可选：PROVIDER_DASHSCOPE_MODEL=qwen3.5-flash   # 默认值为 qwen3.5-flash
 # 也可以在设置页维护 DashScope、Kimi、DeepSeek、GLM、LM Studio 等 Provider
 #
 # 面试参数配置（可选）：
@@ -403,32 +411,30 @@ cp .env.example .env
 docker-compose up -d --build
 ```
 
-> **仅启动依赖服务**：如果只想本地开发调试（用 `./gradlew :app:bootRun` 启动后端），可以只启动基础设施：`docker compose up -d postgres redis minio createbuckets`。将 `.env.example` 复制为 `.env` 并填写 `AI_BAILIAN_API_KEY` 即可，默认账号与 `docker-compose.yml` 一致；Bucket 会由初始化任务或应用启动检查自动创建。
+> **仅启动依赖服务**：本地 `bootRun` 调试请用开发编排（会映射宿主机端口）：`docker compose -f docker-compose.dev.yml -f docker-compose.dev.local.yml up -d`。若只想验证生产编排的依赖层，可执行 `docker compose up -d postgres redis rustfs storage-init`；对象存储现在是 RustFS（S3 兼容），Bucket 由 `storage-init` 用 SigV4 签名请求幂等创建，生产 profile 下应用自身不会建桶。将 `.env.example` 复制为 `.env` 并填写 `PROVIDER_DASHSCOPE_API_KEY` 等必填项。
 
 #### 生产模式（Spring Profile）
 
 `docker-compose.yml` 中的后端服务默认以 `SPRING_PROFILES_ACTIVE=prod` 运行，加载 `app/src/main/resources/application-prod.yml`。相对开发默认值，生产模式会：
 
-- 关闭自动建表（`ddl-auto: validate`）与自动创建向量表（`initialize-schema: false`）；
-- 关闭 SQL 打印，收紧 CORS 白名单，Actuator 默认只暴露 `health,info`，健康详情不外泄；
-- 启用反向代理转发头，并把日志写入文件（挂载 `app_logs` 卷持久化）。
+- 关闭 Hibernate 自动建表（`ddl-auto: validate`）；`vector_store` 由 Spring AI 幂等补齐（compose 默认 `PGVECTOR_INIT_SCHEMA=true`，与 `application-prod.yml` 默认值一致）；
+- 关闭 SQL 打印与 SpringDoc，收紧 CORS 白名单，Actuator 默认只暴露 `health`（生产校验会拒绝其它端点），健康详情不外泄；
+- 启用反向代理转发头，并把日志写入文件（挂载 `app_logs` 卷持久化）；
+- 禁止应用启动时自动建 Bucket，改由 `storage-init` 一次性任务完成。
 
-数据库结构现由 Flyway 管理。空库会自动执行 `V1` 基线迁移和 `V2` 认证/多租户迁移；已有数据库通过 `baseline-on-migrate` 直接执行增量迁移，不再需要临时开启 Hibernate 自动建表。
-
-```bash
-# .env（仅首次创建 pgvector 表时临时添加；Flyway 负责其他业务表）
-PGVECTOR_INIT_SCHEMA=true
-```
+数据库结构现由 Flyway 管理。空库会自动执行 `V1` 基线迁移和后续增量迁移；已有数据库通过 `baseline-on-migrate` 直接执行增量迁移，不再需要临时开启 Hibernate 自动建表。
 
 ```bash
 # 首次启动
 docker compose up -d --build
 
-# 确认 vector_store 创建后，从 .env 删除该行，恢复 false 并重新部署
-docker compose up -d --build app
+# vector_store 建好后如需收紧权限，可在 .env 显式关闭并重新部署
+# PGVECTOR_INIT_SCHEMA=false
 ```
 
-生产上线前请务必核对 `.env`：`APP_AI_CONFIG_ENCRYPTION_KEY` 必须为随机长字符串且部署后保持不变；同时修改 `POSTGRES_PASSWORD` 与 MinIO 的 `MINIO_ROOT_USER/PASSWORD`，并将 `CORS_ALLOWED_ORIGINS` 设为真实域名（`docker-compose.yml` 中 MinIO/PG/Redis 的宿主机端口映射建议仅保留内网或移除，只对外暴露 80）。
+生产上线前请务必核对 `.env`：`APP_AI_CONFIG_ENCRYPTION_KEY` 必须为随机长字符串且部署后保持不变；同时修改 `POSTGRES_PASSWORD` 与对象存储凭据 `RUSTFS_ACCESS_KEY / RUSTFS_SECRET_KEY`，并将 `CORS_ALLOWED_ORIGINS` 设为真实 HTTPS 域名。`docker-compose.yml` 中对象存储 9000 只绑定 `127.0.0.1`，PG/Redis 不映射宿主机端口；真正公网部署请删除该端口映射，只对外暴露 80。
+
+> 注意：`.env` 只参与 Compose 变量插值，**不会自动注入容器**。新增自定义变量时必须在 `docker-compose.yml` 的 `app.environment` 中同步补一行，否则容器内读到的仍是空值。
 
 若需在本机沿用开发默认行为跑全栈容器，可设置 `SPRING_PROFILES_ACTIVE=dev`（或留空）。
 
@@ -440,11 +446,12 @@ docker compose up -d --build app
 | ---------------- | ---------------------------------------------- | ------------ | ------------ | ---------------------- |
 | **前端应用**     | [http://localhost](http://localhost)           | -            | -            | 用户访问入口           |
 | **后端 API**     | [http://localhost:8080](http://localhost:8080) | -            | -            | RESTful API            |
-| **接口文档**     | [http://localhost:8080/swagger-ui.html](http://localhost:8080/swagger-ui.html) | - | - | SpringDoc/Swagger UI |
-| **MinIO 控制台** | [http://localhost:9001](http://localhost:9001) | `minioadmin` | `minioadmin` | 对象存储管理           |
-| **MinIO API**    | `localhost:9000`                               | -            | -            | S3 兼容接口            |
-| **PostgreSQL**   | `localhost:5432`                               | `postgres`   | `password`   | 数据库 (包含 pgvector) |
-| **Redis**        | `localhost:6379`                               | -            | -            | 缓存与消息队列         |
+| **接口文档**     | [http://localhost:8080/swagger-ui.html](http://localhost:8080/swagger-ui.html) | - | - | 仅开发 profile 可用；prod 默认关闭 SpringDoc |
+| **RustFS API**   | `127.0.0.1:9000`                              | `RUSTFS_ACCESS_KEY` | `RUSTFS_SECRET_KEY` | S3 兼容接口；生产不启用 9001 控制台 |
+| **PostgreSQL**   | 仅容器网络 `postgres:5432`                     | `postgres`   | `.env` 的 `POSTGRES_PASSWORD` | 生产 compose 不映射宿主机端口 |
+| **Redis**        | 仅容器网络 `redis:6379`                        | -            | -            | 生产 compose 不映射宿主机端口 |
+
+> 本地 `bootRun` 需要宿主机端口时，使用 `docker compose -f docker-compose.dev.yml -f docker-compose.dev.local.yml up -d`（5432 / 6380:6379 / 9000 / 9001），此时浏览器可访问 RustFS 控制台 `http://localhost:9001`。
 
 ### 4. 常用运维命令
 
@@ -524,7 +531,7 @@ spring:
 
 ### Q: 语音面试无法识别或没有声音？
 
-语音面试的 ASR/TTS 默认也使用 `AI_BAILIAN_API_KEY`。请检查浏览器麦克风权限和后端日志中的 DashScope 连接状态。浏览器麦克风只能在 HTTPS 或 localhost 使用。若日志出现 `AllocationQuota.FreeTierOnly`，需要在阿里云百炼控制台关闭“仅使用免费额度”或开通付费额度；额度不可用时页面会切换到浏览器中文语音。
+语音面试的 ASR/TTS 默认也使用 `PROVIDER_DASHSCOPE_API_KEY`。请检查浏览器麦克风权限和后端日志中的 DashScope 连接状态。浏览器麦克风只能在 HTTPS 或 localhost 使用。若日志出现 `AllocationQuota.FreeTierOnly`，需要在阿里云百炼控制台关闭“仅使用免费额度”或开通付费额度；额度不可用时页面会切换到浏览器中文语音。
 
 ### Q: 简历分析一直显示"分析中"？
 

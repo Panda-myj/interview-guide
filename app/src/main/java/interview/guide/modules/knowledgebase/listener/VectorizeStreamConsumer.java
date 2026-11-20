@@ -6,11 +6,19 @@ import interview.guide.infrastructure.redis.RedisService;
 import interview.guide.modules.knowledgebase.model.VectorStatus;
 import interview.guide.modules.knowledgebase.repository.KnowledgeBaseRepository;
 import interview.guide.modules.knowledgebase.model.KnowledgeBaseEntity;
+import interview.guide.modules.auth.model.UserRole;
+import interview.guide.modules.auth.security.AuthPrincipal;
 import interview.guide.modules.knowledgebase.service.KnowledgeBaseVectorService;
+import interview.guide.modules.llmprovider.service.UserLlmConfigService;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.core.context.SecurityContext;
+import org.springframework.security.core.context.SecurityContextHolder;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.stream.StreamMessageId;
 import org.springframework.stereotype.Component;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -23,15 +31,18 @@ public class VectorizeStreamConsumer extends AbstractStreamConsumer<VectorizeStr
 
     private final KnowledgeBaseVectorService vectorService;
     private final KnowledgeBaseRepository knowledgeBaseRepository;
+    private final UserLlmConfigService userLlmConfigService;
 
     public VectorizeStreamConsumer(
         RedisService redisService,
         KnowledgeBaseVectorService vectorService,
-        KnowledgeBaseRepository knowledgeBaseRepository
+        KnowledgeBaseRepository knowledgeBaseRepository,
+        UserLlmConfigService userLlmConfigService
     ) {
         super(redisService);
         this.vectorService = vectorService;
         this.knowledgeBaseRepository = knowledgeBaseRepository;
+        this.userLlmConfigService = userLlmConfigService;
     }
 
     record VectorizePayload(Long kbId, String content) {}
@@ -97,7 +108,26 @@ public class VectorizeStreamConsumer extends AbstractStreamConsumer<VectorizeStr
             log.warn("知识库已被删除，跳过向量化任务: kbId={}", kbId);
             return;
         }
-        vectorService.vectorizeAndStore(kbId, kb.getOwnerUser().getId(), payload.content());
+        Long ownerUserId = kb.getOwnerUser().getId();
+        if (!userLlmConfigService.hasEmbeddingConfig(ownerUserId)) {
+            // 用户未配置默认向量模型：任务不再反复重试，由前端在设置页给出明确引导
+            log.warn("知识库归属用户未配置默认向量模型，跳过向量化: kbId={}, ownerUserId={}", kbId, ownerUserId);
+            markFailed(payload, "尚未设置默认向量模型，请前往「设置」页配置后再向量化");
+            return;
+        }
+
+        // 以知识库归属用户的身份执行向量化，Embedding 委托按其默认向量模型解析
+        SecurityContext context = SecurityContextHolder.createEmptyContext();
+        context.setAuthentication(UsernamePasswordAuthenticationToken.authenticated(
+            new AuthPrincipal(ownerUserId, UserRole.USER, null, null, null),
+            null,
+            List.of(new SimpleGrantedAuthority("ROLE_USER"))));
+        SecurityContextHolder.setContext(context);
+        try {
+            vectorService.vectorizeAndStore(kbId, ownerUserId, payload.content());
+        } finally {
+            SecurityContextHolder.clearContext();
+        }
     }
 
     @Override

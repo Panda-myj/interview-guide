@@ -35,17 +35,20 @@ public class ActiveUserFilter extends OncePerRequestFilter {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         if (authentication != null
             && authentication.getPrincipal() instanceof AuthPrincipal principal) {
-            boolean active = userRepository.findById(principal.userId())
-                .map(user -> user.getStatus() == UserStatus.ACTIVE)
+            // 角色降权后旧 access token 内仍是旧 role，必须一并校验，否则最长 15 分钟内
+            // 仍能凭 ADMIN claim 访问管理接口。
+            boolean stillValid = userRepository.findById(principal.userId())
+                .map(user -> user.getStatus() == UserStatus.ACTIVE
+                    && user.getRole() == principal.role())
                 .orElse(false);
-            if (!active) {
+            if (!stillValid) {
                 SecurityContextHolder.clearContext();
                 response.setStatus(HttpStatus.UNAUTHORIZED.value());
                 response.setContentType(MediaType.APPLICATION_JSON_VALUE);
                 response.setCharacterEncoding("UTF-8");
                 objectMapper.writeValue(
                     response.getWriter(),
-                    Result.error(ErrorCode.AUTH_USER_DISABLED, "账号已被禁用或不存在")
+                    Result.error(ErrorCode.AUTH_USER_DISABLED, "账号已被禁用、不存在或权限已变更，请重新登录")
                 );
                 return;
             }

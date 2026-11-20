@@ -452,7 +452,7 @@ function SuggestionSection({
             </div>
             <div className="mb-2">
               <p className="font-semibold text-slate-900 dark:text-white mb-1">{s.issue || '问题描述'}</p>
-              <p className="text-sm leading-relaxed text-slate-700 dark:text-slate-300">{s.recommendation || s}</p>
+              <p className="text-sm leading-relaxed text-slate-700 dark:text-slate-300">{s.recommendation ?? s.issue ?? ''}</p>
             </div>
           </motion.div>
         ))}

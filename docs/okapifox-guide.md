@@ -117,7 +117,7 @@ http://localhost:8080/v3/api-docs
 
 ### 铁律三：AI 接口不是免费靶子
 
-创建面试、提交答案、生成评估、知识库问答都会真实调用 DashScope（用 `.env` 里的 `AI_BAILIAN_API_KEY`），又慢又花钱。原则：
+创建面试、提交答案、生成评估、知识库问答都会真实调用 DashScope（用 `.env` 里的 `PROVIDER_DASHSCOPE_API_KEY`），又慢又花钱。原则：
 
 - 日常回归只跑「健康检查 + 面试日程 + 简历列表」这类不调 LLM 的接口。
 - 必须跑 AI 接口时，用最小的 `questionCount`（最小 3，有 `@Min(3)` 校验）。
@@ -398,7 +398,7 @@ ws://localhost:8080/ws/voice-interview/{sessionId}
 
 这个项目有两处和密钥打交道，是 Apifox 里最容易出事的地方。
 
-**第一处：`.env` 里的 `AI_BAILIAN_API_KEY`。** 它只应存在于后端运行环境，**不要**复制进 Apifox 环境变量。Apifox 调的是后端自己的接口，后端用它自己的密钥，Apifox 不需要知道。
+**第一处：`.env` 里的 `PROVIDER_DASHSCOPE_API_KEY`。** 它只应存在于后端运行环境，**不要**复制进 Apifox 环境变量。Apifox 调的是后端自己的接口，后端用它自己的密钥，Apifox 不需要知道。
 
 **第二处：LLM Provider 管理接口的请求体。** `POST /api/llm-provider`、`PUT /api/llm-provider/{id}`、`PUT /api/llm-provider/voice/asr|tts` 需要真实 `apiKey`，这些值会落盘到 `~/.interview-guide/llm-providers.yml`。做法：
 

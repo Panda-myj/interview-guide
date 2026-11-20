@@ -92,3 +92,32 @@ export interface TtsConfigRequest {
   speechRate?: number;
   volume?: number;
 }
+
+export interface UserProviderItem {
+  id: number;
+  name: string;
+  baseUrl: string;
+  maskedApiKey: string;
+  model: string;
+  embeddingModel: string | null;
+  embeddingDimensions: number | null;
+  supportsEmbedding: boolean;
+  temperature: number | null;
+  defaultChatProvider: boolean;
+  defaultEmbeddingProvider: boolean;
+}
+
+export interface UserSaveProviderRequest {
+  name: string;
+  baseUrl: string;
+  apiKey?: string;
+  model: string;
+  embeddingModel?: string;
+  embeddingDimensions?: number;
+  supportsEmbedding?: boolean;
+  temperature?: number;
+}
+
+export interface UserDefaultRequest {
+  providerId: number;
+}

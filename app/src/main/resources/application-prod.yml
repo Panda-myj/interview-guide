@@ -32,13 +32,16 @@ spring:
   ai:
     vectorstore:
       pgvector:
-        # 生产不自动创建 / 变更 vector_store 表。
-        # 首次部署空库时：临时设置 PGVECTOR_INIT_SCHEMA=true，完成后改回 false。
-        initialize-schema: ${PGVECTOR_INIT_SCHEMA:false}
+        # 默认 true：以 CREATE IF NOT EXISTS 幂等补齐 vector_store，兼容空库首次部署。
+        # 表结构稳定后可显式设置 PGVECTOR_INIT_SCHEMA=false 收紧权限。
+        initialize-schema: ${PGVECTOR_INIT_SCHEMA:true}
 
 app:
   auth:
     secure-cookies: true
+    # 生产强制关闭匿名调试入口（硬编码，不读取环境变量）
+    dev:
+      anonymous-admin: false
     sms:
       expose-debug-code: false
   # 生产对象存储：不提供开发默认凭据，缺失时由 ProductionConfigurationValidator 快速失败
@@ -73,8 +76,7 @@ logging:
       max-history: ${LOG_MAX_HISTORY:14}
       total-size-cap: ${LOG_TOTAL_SIZE_CAP:2GB}
 
-# 生产默认只暴露健康检查端点；需要 Prometheus 抓取时设置
-# ACTUATOR_ENDPOINTS=health,info,metrics,prometheus
+# 生产校验只允许暴露 health 端点；设置其它端点会拒绝启动（见 ProductionConfigurationValidator）。
 management:
   endpoints:
     web:

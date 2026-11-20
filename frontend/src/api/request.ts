@@ -168,7 +168,8 @@ instance.interceptors.response.use(
       return response;
     }
 
-    const result = response.data as Result;
+    // 用 unknown 承接，避免 as Result 让类型守卫在 else 分支把值收窄成 never。
+    const result: unknown = response.data;
 
     // 检查是否是 Result 格式
     if (isResult(result)) {
@@ -181,6 +182,17 @@ instance.interceptors.response.use(
       return Promise.reject(new Error(result.message || '请求失败'));
     }
     
+    // 非标准 Result 格式（例如 message 为 null 的错误响应）不能当成功数据透传：
+    // 只认 code 为数字即可判定业务成败，message 缺失时回退到通用文案。
+    if (isRecord(result) && typeof result.code === 'number') {
+      if (result.code !== SUCCESS_CODE) {
+        return Promise.reject(new Error(
+          typeof result.message === 'string' && result.message ? result.message : '请求失败'));
+      }
+      response.data = result.data;
+      return response;
+    }
+
     // 非 Result 格式，直接返回
     return response;
   },

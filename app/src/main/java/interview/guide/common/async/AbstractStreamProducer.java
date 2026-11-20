@@ -1,6 +1,7 @@
 package interview.guide.common.async;
 
 import interview.guide.common.constant.AsyncTaskStreamConstants;
+import interview.guide.common.util.StringUtil;
 import interview.guide.infrastructure.redis.RedisService;
 import lombok.extern.slf4j.Slf4j;
 
@@ -46,10 +47,7 @@ public abstract class AbstractStreamProducer<T> {
     }
 
     protected String truncateError(String error) {
-        if (error == null) {
-            return null;
-        }
-        return error.length() > 500 ? error.substring(0, 500) : error;
+        return StringUtil.truncate(error, 500);
     }
 
 //    taskDisplayName()：日志标识。

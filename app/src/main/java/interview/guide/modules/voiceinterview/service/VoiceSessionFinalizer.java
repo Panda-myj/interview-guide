@@ -9,6 +9,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 语音会话收尾器。
@@ -27,6 +28,7 @@ public class VoiceSessionFinalizer {
 
     static final String RETRY_KEY = "voice:interview:finalize:retry";
     static final String DEAD_LETTER_KEY = "voice:interview:finalize:dead-letter";
+    private static final String RETRY_LOCK_KEY = "voice:interview:finalize:retry-lock";
     private static final String FIELD_SEPARATOR = "|";
 
     private final VoiceInterviewService voiceInterviewService;
@@ -84,14 +86,27 @@ public class VoiceSessionFinalizer {
             survivors.add(new FinalizeTask(task.sessionId(), task.reason(), task.connectionId(), nextAttempt));
         }
 
-        // RedisService 未提供列表元素删除，这里采用「读全量 → 删除 → 重写存活项」的方式保证幂等收敛
+        // RedisService 未提供列表元素删除，这里采用「读全量 → 删除 → 重写存活项」的方式保证幂等收敛。
+        // 该读改写非原子，多实例并发调度会互相覆盖重写结果，因此用分布式锁串行化整轮处理。
+        boolean locked = false;
         try {
+            locked = redisService.tryLock(RETRY_LOCK_KEY, 5_000, 60_000, TimeUnit.MILLISECONDS);
+            if (!locked) {
+                // 其他实例正在处理本轮重试，跳过即可（下一轮 30s 后再试）
+                log.debug("Skip voice session finalize retry: another instance is processing");
+                return survivors.size();
+            }
             redisService.delete(RETRY_KEY);
             survivors.forEach(this::enqueueRetry);
+            return survivors.size();
         } catch (RuntimeException e) {
             log.warn("Voice session finalize retry queue rewrite failed: {}", e.getMessage());
+            return survivors.size();
+        } finally {
+            if (locked) {
+                redisService.unlock(RETRY_LOCK_KEY);
+            }
         }
-        return survivors.size();
     }
 
     /**

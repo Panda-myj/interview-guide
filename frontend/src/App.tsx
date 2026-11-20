@@ -1,4 +1,4 @@
-import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate, useOutletContext, useParams } from 'react-router-dom';
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate, useOutletContext, useParams, useSearchParams } from 'react-router-dom';
 import Layout from './components/Layout';
 import { useEffect, useState, Suspense, lazy } from 'react';
 import { historyApi, type InterviewDetail } from './api/history';
@@ -8,7 +8,7 @@ import type { CategoryDTO } from './api/skill';
 import { Loader2 } from 'lucide-react';
 import { ROUTES, ROUTE_SEGMENTS, path } from './constants/routes';
 import { AuthProvider } from './auth/AuthProvider';
-import { AdminRoute, ProtectedRoute } from './auth/RouteGuards';
+import { ProtectedRoute } from './auth/RouteGuards';
 
 // Lazy load components
 const UploadPage = lazy(() => import('./pages/UploadPage'));
@@ -104,10 +104,14 @@ function InterviewWrapper() {
   const { resumeId } = useParams<{ resumeId: string }>();
   const navigate = useNavigate();
   const location = useLocation();
+  const [searchParams] = useSearchParams();
   const entryState = (location.state as InterviewEntryState | undefined) ?? {};
   const [resumeText, setResumeText] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const effectiveResumeId = resumeId ? parseInt(resumeId, 10) : entryState.resumeId;
+  // 继续面试的会话 ID 同时从 URL query 读取：location.state 在刷新/直达时会丢失，
+  // 一旦丢失 InterviewPage 会误判为新面试并 forceCreate 一个新会话。
+  const sessionIdToResume = searchParams.get('session') ?? entryState.sessionIdToResume;
 
   useEffect(() => {
     // 优先从location state获取resumeText
@@ -159,7 +163,7 @@ function InterviewWrapper() {
     <Interview
       resumeText={resumeText}
       resumeId={effectiveResumeId}
-      sessionIdToResume={entryState.sessionIdToResume}
+      sessionIdToResume={sessionIdToResume}
       initialConfig={entryState.interviewConfig}
       onBack={handleBack}
       onInterviewComplete={handleInterviewComplete}
@@ -204,9 +208,8 @@ function App() {
                 {/* 账号与安全：站内登录提醒、注销账号（所有登录用户可访问） */}
                 <Route path={ROUTE_SEGMENTS.account} element={<AccountPage />} />
 
-                <Route element={<AdminRoute />}>
-                  <Route path={ROUTE_SEGMENTS.settings} element={<SettingsPage />} />
-                </Route>
+                {/* 设置：所有登录用户可配置自己的大模型；管理员区域在页面内二次区分 */}
+                <Route path={ROUTE_SEGMENTS.settings} element={<SettingsPage />} />
               </Route>
             </Route>
             <Route path="*" element={<Navigate to={ROUTES.resumeHistory} replace />} />
@@ -235,7 +238,10 @@ function InterviewHistoryWrapper() {
   };
 
   const handleContinueInterview = (sessionId: string) => {
-    navigate(ROUTES.interview, { state: { sessionIdToResume: sessionId } });
+    // 把会话 ID 写入 URL，刷新后仍可恢复同一会话（state 会在刷新时丢失）
+    navigate(`${ROUTES.interview}?session=${encodeURIComponent(sessionId)}`, {
+      state: { sessionIdToResume: sessionId },
+    });
   };
 
   return <InterviewHistoryPage onBack={handleBack} onViewInterview={handleViewInterview} onRestartInterview={handleRestartInterview} onContinueInterview={handleContinueInterview} />;

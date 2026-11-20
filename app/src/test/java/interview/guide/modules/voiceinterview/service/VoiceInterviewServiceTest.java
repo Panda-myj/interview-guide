@@ -647,6 +647,51 @@ class VoiceInterviewServiceTest {
         }
 
         @Test
+        @DisplayName("缓存写入使用不含Hibernate代理的快照，序列化失败不中断主流程")
+        void testCacheSessionUsesDetachedSnapshot() throws Exception {
+            Long sessionId = 99L;
+            interview.guide.modules.auth.model.UserEntity owner =
+                new interview.guide.modules.auth.model.UserEntity();
+            owner.setId(42L);
+            VoiceInterviewSessionEntity session = VoiceInterviewSessionEntity.builder()
+                    .id(sessionId)
+                    .ownerUser(owner)
+                    .roleType("java-backend")
+                    .status(VoiceInterviewSessionStatus.IN_PROGRESS)
+                    .build();
+
+            // 反射调用私有 cacheSession 验证写入的是裁剪后的快照
+            java.lang.reflect.Method method = VoiceInterviewService.class.getDeclaredMethod(
+                "cacheSession", VoiceInterviewSessionEntity.class);
+            method.setAccessible(true);
+            method.invoke(voiceInterviewService, session);
+
+            org.mockito.ArgumentCaptor<VoiceInterviewSessionEntity> captor =
+                org.mockito.ArgumentCaptor.forClass(VoiceInterviewSessionEntity.class);
+            verify(bucket, times(1)).set(captor.capture(), any(Duration.class));
+            VoiceInterviewSessionEntity cached = captor.getValue();
+            assertNotNull(cached.getOwnerUser());
+            assertEquals(42L, cached.getOwnerUser().getId());
+            assertEquals("java-backend", cached.getRoleType());
+        }
+
+        @Test
+        @DisplayName("缓存读取异常时降级到数据库而不是抛500")
+        void testGetSessionCacheFailureFallsBackToDb() {
+            Long sessionId = 88L;
+            VoiceInterviewSessionEntity fromDb = VoiceInterviewSessionEntity.builder()
+                    .id(sessionId).roleType("from-db").build();
+            when(bucket.get()).thenThrow(new RuntimeException("kryo InaccessibleObjectException"));
+            when(sessionRepository.findById(sessionId)).thenReturn(Optional.of(fromDb));
+
+            VoiceInterviewSessionEntity result = voiceInterviewService.getSession(sessionId);
+
+            assertNotNull(result);
+            assertEquals("from-db", result.getRoleType());
+            verify(sessionRepository, times(1)).findById(sessionId);
+        }
+
+        @Test
         @DisplayName("获取会话 - null ID")
         void testGetSession_NullId() {
             // When

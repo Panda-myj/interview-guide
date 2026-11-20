@@ -6,6 +6,7 @@ import interview.guide.common.model.ResourceCleanupStatus;
 import interview.guide.common.model.ResourceCleanupType;
 import interview.guide.common.model.ResourceDeletionCompensationEntity;
 import interview.guide.common.repository.ResourceDeletionCompensationRepository;
+import interview.guide.common.util.StringUtil;
 import interview.guide.modules.auth.model.UserEntity;
 import interview.guide.modules.auth.repository.UserRepository;
 import interview.guide.modules.auth.security.CurrentUserService;
@@ -256,9 +257,6 @@ public class ResourceDeletionCompensationService {
   }
 
   private String truncate(String value, int maxLength) {
-    if (value == null) {
-      return null;
-    }
-    return value.length() > maxLength ? value.substring(0, maxLength) : value;
+    return StringUtil.truncate(value, maxLength);
   }
 }

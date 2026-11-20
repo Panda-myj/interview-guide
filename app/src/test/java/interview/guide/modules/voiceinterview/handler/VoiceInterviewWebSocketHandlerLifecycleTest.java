@@ -77,6 +77,8 @@ class VoiceInterviewWebSocketHandlerLifecycleTest {
     @Mock
     private VoiceSessionAuditLogger auditLogger;
     @Mock
+    private interview.guide.modules.llmprovider.service.UserLlmConfigService userLlmConfigService;
+    @Mock
     private ObjectProvider<MeterRegistry> meterRegistryProvider;
     @Mock
     private WebSocketSession session;
@@ -98,6 +100,7 @@ class VoiceInterviewWebSocketHandlerLifecycleTest {
             sessionFinalizer,
             auditLogger,
             properties,
+            userLlmConfigService,
             meterRegistryProvider
         );
 
@@ -268,7 +271,7 @@ class VoiceInterviewWebSocketHandlerLifecycleTest {
             handler.afterConnectionEstablished(session);
 
             ArgumentCaptor<Consumer<Throwable>> errorCaptor = ArgumentCaptor.forClass(Consumer.class);
-            verify(sttService).startTranscription(eq(SESSION_ID), any(), any(), any(), errorCaptor.capture());
+            verify(sttService).startTranscription(eq(SESSION_ID), any(), any(), any(), errorCaptor.capture(), any());
 
             errorCaptor.getValue().accept(new IllegalStateException("asr down"));
             errorCaptor.getValue().accept(new IllegalStateException("asr down"));

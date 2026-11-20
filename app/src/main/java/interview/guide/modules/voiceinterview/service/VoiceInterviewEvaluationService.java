@@ -1,6 +1,6 @@
 package interview.guide.modules.voiceinterview.service;
 
-import interview.guide.common.ai.LlmProviderRegistry;
+import interview.guide.modules.llmprovider.service.UserLlmConfigService;
 import interview.guide.common.evaluation.EvaluationReport;
 import interview.guide.common.evaluation.QaRecord;
 import interview.guide.common.evaluation.UnifiedEvaluationService;
@@ -38,7 +38,7 @@ import java.util.stream.Collectors;
 public class VoiceInterviewEvaluationService {
 
     private final UnifiedEvaluationService unifiedEvaluationService;
-    private final LlmProviderRegistry llmProviderRegistry;
+    private final UserLlmConfigService userLlmConfigService;
     private final VoiceInterviewEvaluationRepository evaluationRepository;
     private final VoiceInterviewMessageRepository messageRepository;
     private final VoiceInterviewSessionRepository sessionRepository;
@@ -65,8 +65,8 @@ public class VoiceInterviewEvaluationService {
 
             List<QaRecord> qaRecords = buildQaRecords(messages);
 
-            String provider = session.getLlmProvider();
-            ChatClient chatClient = llmProviderRegistry.getChatClientOrDefault(provider);
+            ChatClient chatClient = userLlmConfigService.requireChatClientForUser(
+                session.getOwnerUser().getId());
 
             String sessionIdStr = String.valueOf(sessionId);
             String referenceContext = skillService.buildEvaluationReferenceSectionSafe(session.getSkillId());

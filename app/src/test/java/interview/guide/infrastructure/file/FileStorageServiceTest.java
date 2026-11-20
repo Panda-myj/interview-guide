@@ -32,7 +32,7 @@ class FileStorageServiceTest {
         StorageConfigProperties storageConfig = new StorageConfigProperties();
         storageConfig.setEndpoint("http://localhost:9000");
         storageConfig.setBucket("interview-guide");
-        fileStorageService = new FileStorageService(s3Client, storageConfig);
+        fileStorageService = new FileStorageService(s3Client, storageConfig, java.time.Clock.systemUTC());
     }
 
     @Test

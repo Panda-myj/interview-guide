@@ -6,6 +6,7 @@ import interview.guide.common.model.AsyncTaskStatus;
 import interview.guide.modules.resume.model.ResumeEntity;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.repository.EntityGraph;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
@@ -26,6 +27,12 @@ public interface InterviewSessionRepository extends JpaRepository<InterviewSessi
      */
     Optional<InterviewSessionEntity> findBySessionId(String sessionId);
 
+    /**
+     * 恢复会话时使用：一次性抓取 resume / ownerUser，
+     * 避免会话缓存过期后从 DB 恢复时访问 LAZY 关联触发 LazyInitializationException
+     * （该异常会被上层 catch 吞掉并误报为“会话不存在”，导致无法继续面试）。
+     */
+    @EntityGraph(attributePaths = {"resume", "ownerUser"})
     Optional<InterviewSessionEntity> findBySessionIdAndOwnerUserId(String sessionId, Long ownerUserId);
 
     @Modifying(clearAutomatically = true, flushAutomatically = true)

@@ -3,6 +3,7 @@ package interview.guide.modules.knowledgebase.service;
 import interview.guide.common.ai.AiCallClassifier;
 import interview.guide.common.ai.AiCircuitBreaker;
 import interview.guide.common.ai.LlmProviderRegistry;
+import interview.guide.modules.llmprovider.service.UserLlmConfigService;
 import interview.guide.common.ai.PromptSecurityConstants;
 import interview.guide.common.ai.PromptSanitizer;
 import interview.guide.common.ai.RagContextBuilder;
@@ -53,6 +54,7 @@ public class KnowledgeBaseQueryService {
     /** 流式回答只保留前 4000 字用于引用统计，避免长回答占用内存。 */
     private static final int MAX_CITATION_SCAN_CHARS = 4000;
 
+    private final UserLlmConfigService userLlmConfigService;
     private final LlmProviderRegistry llmProviderRegistry;
     private final KnowledgeBaseVectorService vectorService;
     private final KnowledgeBaseListService listService;
@@ -76,6 +78,7 @@ public class KnowledgeBaseQueryService {
 
     @Autowired
     public KnowledgeBaseQueryService(
+            UserLlmConfigService userLlmConfigService,
             LlmProviderRegistry llmProviderRegistry,
             KnowledgeBaseVectorService vectorService,
             KnowledgeBaseListService listService,
@@ -85,7 +88,7 @@ public class KnowledgeBaseQueryService {
             PromptSanitizer promptSanitizer,
             AiCircuitBreaker circuitBreaker,
             RagMetrics ragMetrics) throws IOException {
-        this(llmProviderRegistry, vectorService, listService, countService, queryProperties,
+        this(userLlmConfigService, llmProviderRegistry, vectorService, listService, countService, queryProperties,
             resourceLoader, promptSanitizer, circuitBreaker, ragMetrics, queryProperties.getContext());
     }
 
@@ -99,11 +102,29 @@ public class KnowledgeBaseQueryService {
             KnowledgeBaseCountService countService,
             KnowledgeBaseQueryProperties queryProperties,
             ResourceLoader resourceLoader) throws IOException {
-        this(llmProviderRegistry, vectorService, listService, countService, queryProperties,
+        this(null, llmProviderRegistry, vectorService, listService, countService, queryProperties,
             resourceLoader, null, null, null, queryProperties.getContext());
     }
 
+    /**
+     * 兼容旧装配方式（单测）：按全局默认 Provider 解析 ChatClient。
+     */
+    public KnowledgeBaseQueryService(
+            LlmProviderRegistry llmProviderRegistry,
+            KnowledgeBaseVectorService vectorService,
+            KnowledgeBaseListService listService,
+            KnowledgeBaseCountService countService,
+            KnowledgeBaseQueryProperties queryProperties,
+            ResourceLoader resourceLoader,
+            PromptSanitizer promptSanitizer,
+            AiCircuitBreaker circuitBreaker,
+            RagMetrics ragMetrics) throws IOException {
+        this(null, llmProviderRegistry, vectorService, listService, countService, queryProperties,
+            resourceLoader, promptSanitizer, circuitBreaker, ragMetrics, queryProperties.getContext());
+    }
+
     private KnowledgeBaseQueryService(
+            UserLlmConfigService userLlmConfigService,
             LlmProviderRegistry llmProviderRegistry,
             KnowledgeBaseVectorService vectorService,
             KnowledgeBaseListService listService,
@@ -114,6 +135,7 @@ public class KnowledgeBaseQueryService {
             AiCircuitBreaker circuitBreaker,
             RagMetrics ragMetrics,
             KnowledgeBaseQueryProperties.Context context) throws IOException {
+        this.userLlmConfigService = userLlmConfigService;
         this.llmProviderRegistry = llmProviderRegistry;
         this.vectorService = vectorService;
         this.listService = listService;
@@ -150,7 +172,12 @@ public class KnowledgeBaseQueryService {
     }
 
     private ChatClient getChatClient() {
-        return llmProviderRegistry.getDefaultChatClient();
+        // 使用当前登录用户自己的大模型配置；未配置时抛 PROVIDER_NOT_CONFIGURED 明确提示。
+        // userLlmConfigService 为 null 仅出现在旧的单测装配路径，此时回退全局默认客户端。
+        if (userLlmConfigService == null) {
+            return llmProviderRegistry.getDefaultChatClient();
+        }
+        return userLlmConfigService.requireCurrentUserChatClient();
     }
 
     /**
@@ -321,8 +348,9 @@ public class KnowledgeBaseQueryService {
         List<String> kbNames = listService.getKnowledgeBaseNames(request.knowledgeBaseIds());
         String kbNamesStr = String.join("、", kbNames);
 
-        // 使用第一个知识库ID作为主要标识（兼容前端）
-        Long primaryKbId = request.knowledgeBaseIds().getFirst();
+        // 使用第一个知识库ID作为主要标识（兼容前端）；空列表与 answerQuestion 的语义一致，置为 null
+        List<Long> kbIds = request.knowledgeBaseIds();
+        Long primaryKbId = (kbIds == null || kbIds.isEmpty()) ? null : kbIds.getFirst();
 
         return new QueryResponse(answer, primaryKbId, kbNamesStr);
     }

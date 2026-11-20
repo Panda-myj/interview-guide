@@ -48,6 +48,9 @@ class VoiceSessionFinalizerTest {
         properties = new VoiceInterviewProperties();
         properties.getLifecycle().setFinalizeMaxAttempts(3);
         finalizer = new VoiceSessionFinalizer(voiceInterviewService, redisService, auditLogger, properties);
+        // 重试队列的重写段已用分布式锁串行化，默认放行以便单测覆盖队列逻辑本身
+        when(redisService.tryLock(anyString(), any(Long.class), any(Long.class), any()))
+            .thenReturn(true);
     }
 
     @Nested

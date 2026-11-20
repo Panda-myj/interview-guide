@@ -26,6 +26,7 @@ import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 
 import java.io.IOException;
+import java.time.Clock;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.UUID;
@@ -41,6 +42,7 @@ public class FileStorageService {
 
     private final S3Client s3Client;
     private final StorageConfigProperties storageConfig;
+    private final Clock clock;
 
     @PostConstruct
     public void init() {
@@ -106,7 +108,8 @@ public class FileStorageService {
             return s3Client.getObjectAsBytes(getRequest).asByteArray();
         } catch (S3Exception e) {
             log.error("下载文件失败: {} - {}", fileKey, e.getMessage(), e);
-            throw new BusinessException(ErrorCode.STORAGE_DOWNLOAD_FAILED, "文件下载失败: " + e.getMessage());
+            // 对外固定文案，避免内部 endpoint/键名等细节泄漏给前端
+            throw new BusinessException(ErrorCode.STORAGE_DOWNLOAD_FAILED, "文件下载失败");
         }
     }
 
@@ -127,15 +130,19 @@ public class FileStorageService {
                     .contentLength(file.getSize())
                     .build();
 
-            s3Client.putObject(putRequest, RequestBody.fromInputStream(file.getInputStream(), file.getSize()));
+            try (java.io.InputStream inputStream = file.getInputStream()) {
+                s3Client.putObject(putRequest,
+                    RequestBody.fromInputStream(inputStream, file.getSize()));
+            }
             log.info("文件上传成功: {} -> {}", originalFilename, fileKey);
             return fileKey;
         } catch (IOException e) {
             log.error("读取上传文件失败: {}", e.getMessage(), e);
             throw new BusinessException(ErrorCode.STORAGE_UPLOAD_FAILED, "文件读取失败");
         } catch (S3Exception e) {
-            log.error("上传文件到RustFS失败: {}", e.getMessage(), e);
-            throw new BusinessException(ErrorCode.STORAGE_UPLOAD_FAILED, "文件存储失败: " + e.getMessage());
+            log.error("上传文件到RustFS失败: {} - {}", fileKey, e.getMessage(), e);
+            // 对外固定文案，避免内部 endpoint/键名等细节泄漏给前端
+            throw new BusinessException(ErrorCode.STORAGE_UPLOAD_FAILED, "文件存储失败");
         }
     }
 
@@ -153,8 +160,11 @@ public class FileStorageService {
         } catch (NoSuchKeyException e) {
             return false;
         } catch (S3Exception e) {
-            log.warn("检查文件存在性失败: {} - {}", fileKey, e.getMessage());
-            return false;
+            // 只有 NoSuchKey 表示“确实不存在”；存储服务故障不能伪装成不存在，
+            // 否则 downloadFile 会误报“文件不存在”、deleteFile 会静默跳过留下孤儿对象
+            log.error("检查文件存在性失败: {} - {}", fileKey, e.getMessage(), e);
+            throw new BusinessException(ErrorCode.STORAGE_DOWNLOAD_FAILED,
+                "检查文件存在性失败，请稍后重试");
         }
     }
 
@@ -184,12 +194,7 @@ public class FileStorageService {
             return;
         }
 
-        // 检查文件是否存在，避免不必要的删除操作
-        if (!fileExists(fileKey)) {
-            log.warn("文件不存在，跳过删除: {}", fileKey);
-            return;
-        }
-
+        // S3 删除本身幂等，直接删除即可；前置 exists 检查只会引入多余的失败分支
         try {
             DeleteObjectRequest deleteRequest = DeleteObjectRequest.builder()
                     .bucket(storageConfig.getBucket())
@@ -199,7 +204,7 @@ public class FileStorageService {
             log.info("文件删除成功: {}", fileKey);
         } catch (S3Exception e) {
             log.error("删除文件失败: {} - {}", fileKey, e.getMessage(), e);
-            throw new BusinessException(ErrorCode.STORAGE_DELETE_FAILED, "文件删除失败: " + e.getMessage());
+            throw new BusinessException(ErrorCode.STORAGE_DELETE_FAILED, "文件删除失败");
         }
     }
 
@@ -259,7 +264,8 @@ public class FileStorageService {
      * 生成文件键
      */
     private String generateFileKey(String originalFilename, String prefix) {
-        LocalDateTime now = LocalDateTime.now();
+        // 遵循 AppClockConfig 约定：无时区墙钟一律 Asia/Shanghai，禁止直接 LocalDateTime.now()。
+        LocalDateTime now = LocalDateTime.now(clock);
         String datePath = now.format(DATE_PATH_FORMAT);
         String uuid = UUID.randomUUID().toString().substring(0, 8);
         String safeName = sanitizeFilename(originalFilename);

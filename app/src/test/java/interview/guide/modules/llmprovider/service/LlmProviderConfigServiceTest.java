@@ -437,11 +437,12 @@ class LlmProviderConfigServiceTest {
     class SensitiveInfoProtection {
 
         @Test
-        @DisplayName("默认不写 ENV 文件，密钥不落盘")
+        @DisplayName("不写 .env 文件，密钥不落盘")
         void neverWritesEnvFile(@TempDir Path tempDir) throws IOException {
+            // 应用已移除 config-env-path，不再有任何指向 ENV 文件的写入路径；
+            // 这里仍放一个 .env 作为哨兵，确保运行时配置写入不会顺带改写它。
             Path envFile = tempDir.resolve(".env");
-            Files.writeString(envFile, "AI_BAILIAN_API_KEY=existing\n", StandardCharsets.UTF_8);
-            lenient().when(properties.getConfigEnvPath()).thenReturn(envFile.toString());
+            Files.writeString(envFile, "PROVIDER_DASHSCOPE_API_KEY=existing\n", StandardCharsets.UTF_8);
 
             Path yamlFile = tempDir.resolve("runtime-config.yml");
             Files.writeString(yamlFile, RUNTIME_CONFIG_HEADER, StandardCharsets.UTF_8);
@@ -454,11 +455,11 @@ class LlmProviderConfigServiceTest {
             sensitiveService.updateAsrConfig(
                 new AsrConfigRequest(null, null, secret, null, null, null, null, null, null, null));
 
-            assertEquals("AI_BAILIAN_API_KEY=existing\n",
+            assertEquals("PROVIDER_DASHSCOPE_API_KEY=existing\n",
                 Files.readString(envFile, StandardCharsets.UTF_8));
             assertFalse(Files.readString(yamlFile, StandardCharsets.UTF_8).contains(secret));
             assertTrue(Files.readString(yamlFile, StandardCharsets.UTF_8)
-                .contains("${AI_BAILIAN_API_KEY}"));
+                .contains("${PROVIDER_DASHSCOPE_API_KEY}"));
         }
 
         @Test
@@ -488,7 +489,7 @@ class LlmProviderConfigServiceTest {
             assertFalse(content.contains("sk-legacy-plaintext-123456"));
             assertFalse(content.contains("sk-voice-plaintext-abcdef"));
             assertTrue(content.contains("${PROVIDER_KIMI_API_KEY}"));
-            assertTrue(content.contains("${AI_BAILIAN_API_KEY}"));
+            assertTrue(content.contains("${PROVIDER_DASHSCOPE_API_KEY}"));
             assertTrue(content.contains("base-url"));
             assertTrue(content.contains("kimi-latest"));
         }
@@ -673,5 +674,20 @@ class LlmProviderConfigServiceTest {
         );
         method.setAccessible(true);
         return (Map<String, Object>) method.invoke(service, model);
+    }
+
+    @Test
+    @DisplayName("实时 ASR 模型名必须以 -realtime 结尾")
+    void isRealtimeAsrModel_onlyAcceptsRealtimeSuffix() {
+        org.junit.jupiter.api.Assertions.assertTrue(
+            LlmProviderConfigService.isRealtimeAsrModel("qwen3-asr-flash-realtime"));
+        org.junit.jupiter.api.Assertions.assertTrue(
+            LlmProviderConfigService.isRealtimeAsrModel("  qwen3-asr-flash-realtime  "));
+        org.junit.jupiter.api.Assertions.assertFalse(
+            LlmProviderConfigService.isRealtimeAsrModel("qwen3-asr-flash"));
+        org.junit.jupiter.api.Assertions.assertFalse(
+            LlmProviderConfigService.isRealtimeAsrModel(""));
+        org.junit.jupiter.api.Assertions.assertFalse(
+            LlmProviderConfigService.isRealtimeAsrModel(null));
     }
 }

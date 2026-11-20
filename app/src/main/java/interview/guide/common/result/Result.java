@@ -3,7 +3,7 @@ package interview.guide.common.result;
 import interview.guide.common.constant.CommonConstants;
 import interview.guide.common.exception.ErrorCode;
 import lombok.Getter;
-import net.minidev.json.annotate.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 
 /**
  * 统一响应结果

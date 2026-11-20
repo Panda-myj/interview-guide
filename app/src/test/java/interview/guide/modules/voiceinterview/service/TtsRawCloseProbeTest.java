@@ -51,7 +51,7 @@ class TtsRawCloseProbeTest {
 
     String apiKey = resolveApiKey();
     Assumptions.assumeTrue(apiKey != null && !apiKey.isBlank(),
-        "跳过探针：未找到 AI_BAILIAN_API_KEY（环境变量或 .env）");
+        "跳过探针：未找到 PROVIDER_DASHSCOPE_API_KEY（环境变量或 .env）");
 
     List<String> log = new ArrayList<>();
     byte[] closePayload = null;
@@ -297,7 +297,7 @@ class TtsRawCloseProbeTest {
   }
 
   private static String resolveApiKey() {
-    String fromEnv = System.getenv("AI_BAILIAN_API_KEY");
+    String fromEnv = System.getenv("PROVIDER_DASHSCOPE_API_KEY");
     if (fromEnv != null && !fromEnv.isBlank()) {
       return fromEnv.trim();
     }
@@ -319,8 +319,8 @@ class TtsRawCloseProbeTest {
     try {
       for (String line : Files.readAllLines(envFile, StandardCharsets.UTF_8)) {
         String trimmed = line.trim();
-        if (trimmed.startsWith("AI_BAILIAN_API_KEY=")) {
-          String value = trimmed.substring("AI_BAILIAN_API_KEY=".length()).trim();
+        if (trimmed.startsWith("PROVIDER_DASHSCOPE_API_KEY=")) {
+          String value = trimmed.substring("PROVIDER_DASHSCOPE_API_KEY=".length()).trim();
           return value.isEmpty() ? null : value;
         }
       }

@@ -18,8 +18,6 @@ public class VoiceInterviewProperties {
 
     private PhaseConfig phase = new PhaseConfig();
     private AliyunConfig aliyun = new AliyunConfig();
-    private RateLimitConfig rateLimit = new RateLimitConfig();
-    private AudioConfig audio = new AudioConfig();
     private QwenConfig qwen = new QwenConfig();
     private OpeningConfig opening = new OpeningConfig();
     private LifecycleConfig lifecycle = new LifecycleConfig();
@@ -102,22 +100,6 @@ public class VoiceInterviewProperties {
     }
 
     @Data
-    public static class RateLimitConfig {
-        private int maxPerSession = 10;
-        private int maxPerIp = 3;
-        private int maxConcurrent = 50;
-    }
-
-    @Data
-    public static class AudioConfig {
-        private String codec = "opus";
-        private int sampleRate = 16000;
-        private int bitRate = 24000;
-        private int channels = 1;
-        private int chunkDuration = 2000; // 2 seconds
-    }
-
-    @Data
     public static class QwenConfig {
         private AsrConfig asr = new AsrConfig();
         private QwenTtsConfig tts = new QwenTtsConfig();
@@ -134,24 +116,25 @@ public class VoiceInterviewProperties {
         private boolean enableTurnDetection = true;
         private String turnDetectionType = "server_vad";
         private float turnDetectionThreshold = 0.0f;
-        private int turnDetectionSilenceDurationMs = 1000;
+        // 与 application.yml 的 APP_VOICE_ASR_SILENCE_MS 默认值保持一致
+        private int turnDetectionSilenceDurationMs = 2000;
     }
 
     @Data
     public static class QwenTtsConfig {
-        private String model = "qwen3-tts-flash";
+        private String model = "qwen-audio-3.1-tts-flash";
         private String apiKey;
-        /**
-         * 旧版实时 TTS 地址，仅保留用于配置兼容；当前 HTTP TTS 不使用该字段。
-         */
-        private String url = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime";
-        private String voice = "Cherry";
+        private String voice = "longanhuan_v3.1";
         private String format = "pcm";
         private int sampleRate = 24000;
-        private String mode = "commit";
+        // 当前走 qwen3-tts-flash 的官方 HTTP 端点；mode/语言/语速/音量等字段
+        // 仅用于设置页与运行期配置回显，HTTP 端点不接受这些参数。
+        private String mode = "http";
         private String languageType = "Chinese";
         private float speechRate = 1.0f;
         private int volume = 60;
+        // qwen-audio-* 系列使用独立的 SpeechSynthesizer 端点；留空时从 dashscope base-url 自动派生。
+        private String audioEndpoint;
     }
 
     @Data

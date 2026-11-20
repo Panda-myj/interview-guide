@@ -6,6 +6,7 @@ import interview.guide.common.config.LlmProviderProperties.AdvisorConfig;
 import interview.guide.common.config.LlmProviderProperties.ProviderConfig;
 import interview.guide.common.exception.BusinessException;
 import interview.guide.common.exception.ErrorCode;
+import interview.guide.common.util.StringUtil;
 import interview.guide.modules.llmprovider.model.LlmGlobalSettingEntity;
 import interview.guide.modules.llmprovider.model.LlmProviderEntity;
 import interview.guide.modules.llmprovider.repository.LlmGlobalSettingRepository;
@@ -223,6 +224,11 @@ public class LlmProviderRegistry {
     }
 
     public EmbeddingModel getEmbeddingModel(String providerId) {
+        // 与 getChatClient 对齐：入口处统一做空 providerId 校验，避免 null 进入缓存键引发 NPE
+        if (isBlank(providerId)) {
+            throw new BusinessException(ErrorCode.PROVIDER_CONFIG_READ_FAILED,
+                "未指定 LLM Provider，请先配置默认 Embedding Provider 或在请求中显式指定");
+        }
         return embeddingModelCache.computeIfAbsent(providerId, id -> {
             log.info("[LlmProviderRegistry] Creating new embedding model for provider: {}", id);
             return createEmbeddingModel(id);
@@ -247,6 +253,137 @@ public class LlmProviderRegistry {
         }
 
         return builder.build();
+    }
+
+    /**
+     * 用户卡片级 ChatClient：按用户自己的 Provider 卡片构建（成本由用户承担）。
+     * 缓存键为 {@code ucard:{cardId}}，卡片更新/删除后由
+     * {@link #evictCardClients(Long)} 失效。
+     */
+    public ChatClient getCardChatClient(Long cardId, String baseUrl, String apiKey,
+                                        String model, Double temperature) {
+        String cacheKey = cardKey(cardId, null);
+        return clientCache.computeIfAbsent(cacheKey,
+            key -> createCardChatClient(cacheKey, baseUrl, apiKey, model, temperature));
+    }
+
+    /**
+     * 用户卡片级不带工具的 ChatClient，用于出题、简历分析等结构化输出场景。
+     */
+    public ChatClient getCardPlainChatClient(Long cardId, String baseUrl, String apiKey,
+                                             String model, Double temperature) {
+        String cacheKey = cardKey(cardId, "plain");
+        return clientCache.computeIfAbsent(cacheKey,
+            key -> createCardPlainChatClient(cacheKey, baseUrl, apiKey, model, temperature));
+    }
+
+    /**
+     * 用户卡片级语音面试 ChatClient：SkillsTool + 流式 ToolCallAdvisor，手动管理历史。
+     */
+    public ChatClient getCardVoiceChatClient(Long cardId, String baseUrl, String apiKey,
+                                             String model, Double temperature) {
+        String cacheKey = cardKey(cardId, "voice");
+        return clientCache.computeIfAbsent(cacheKey,
+            key -> createCardVoiceChatClient(cacheKey, baseUrl, apiKey, model, temperature));
+    }
+
+    /**
+     * 用户卡片级 EmbeddingModel，用于知识库向量化与检索。
+     */
+    public EmbeddingModel getCardEmbeddingModel(Long cardId, String baseUrl, String apiKey,
+                                                String embeddingModel, Integer dimensions) {
+        String cacheKey = cardKey(cardId, "embedding");
+        return embeddingModelCache.computeIfAbsent(cacheKey,
+            key -> createCardEmbeddingModel(cacheKey, baseUrl, apiKey, embeddingModel, dimensions));
+    }
+
+    /**
+     * 卡片更新或删除后丢弃其缓存客户端，下次调用按新配置重建。
+     */
+    public void evictCardClients(Long cardId) {
+        String prefix = "ucard:" + cardId;
+        clientCache.keySet().removeIf(key -> key.startsWith(prefix));
+        embeddingModelCache.keySet().removeIf(key -> key.startsWith(prefix));
+        log.info("[LlmProviderRegistry] Evicted cached clients for user card {}", cardId);
+    }
+
+    private static String cardKey(Long cardId, String variant) {
+        return variant == null ? "ucard:" + cardId : "ucard:" + cardId + ":" + variant;
+    }
+
+    private ChatClient createCardChatClient(String cacheKey, String baseUrl, String apiKey,
+                                            String model, Double temperature) {
+        OpenAiChatModel chatModel = buildChatModelFromParams(baseUrl, apiKey, model, temperature);
+
+        ChatClient.Builder builder = ChatClient.builder(chatModel);
+        if (interviewSkillsToolCallback != null) {
+            builder.defaultTools(interviewSkillsToolCallback);
+        }
+        List<Advisor> advisors = buildDefaultAdvisors(cacheKey);
+        if (!advisors.isEmpty()) {
+            builder.defaultAdvisors(advisors);
+        }
+        return builder.build();
+    }
+
+    private ChatClient createCardPlainChatClient(String cacheKey, String baseUrl, String apiKey,
+                                                 String model, Double temperature) {
+        OpenAiChatModel chatModel = buildChatModelFromParams(baseUrl, apiKey, model, temperature);
+        ChatClient.Builder builder = ChatClient.builder(chatModel);
+        buildSafeGuardAdvisor().ifPresent(advisor -> builder.defaultAdvisors(List.of(advisor)));
+        log.info("[LlmProviderRegistry] Created card plain ChatClient (no tools) for {}", cacheKey);
+        return builder.build();
+    }
+
+    private ChatClient createCardVoiceChatClient(String cacheKey, String baseUrl, String apiKey,
+                                                 String model, Double temperature) {
+        OpenAiChatModel chatModel = buildChatModelFromParams(baseUrl, apiKey, model, temperature);
+        ChatClient.Builder builder = ChatClient.builder(chatModel);
+        if (interviewSkillsToolCallback != null) {
+            builder.defaultTools(interviewSkillsToolCallback);
+        }
+        List<Advisor> advisors = new ArrayList<>();
+        if (toolCallingManager != null) {
+            advisors.add(buildToolCallAdvisor(true));
+        }
+        buildSafeGuardAdvisor().ifPresent(advisors::add);
+        if (!advisors.isEmpty()) {
+            builder.defaultAdvisors(advisors);
+        }
+        log.info("[LlmProviderRegistry] Created card voice ChatClient (SkillsTool + streaming ToolCall) for {}", cacheKey);
+        return builder.build();
+    }
+
+    private EmbeddingModel createCardEmbeddingModel(String cacheKey, String baseUrl, String apiKey,
+                                                    String embeddingModel, Integer dimensions) {
+        ProviderSnapshot config = new ProviderSnapshot(
+            cacheKey, baseUrl, apiKey, null, embeddingModel, dimensions, true, null);
+        if (!config.supportsEmbedding() || isBlank(config.embeddingModel())) {
+            throw new BusinessException(ErrorCode.PROVIDER_CONFIG_READ_FAILED,
+                "卡片未配置可用的向量模型，无法执行知识库向量化");
+        }
+        log.info("[LlmProviderRegistry] Building card EmbeddingModel - Card: {}, BaseUrl: {}, Model: {}",
+            cacheKey, config.baseUrl(), config.embeddingModel());
+
+        OpenAIClient openAiClient = buildHttpClient(config);
+        OpenAiEmbeddingOptions options = OpenAiEmbeddingOptions.builder()
+            .model(config.embeddingModel())
+            .dimensions(resolveEmbeddingDimensions(config.embeddingDimensions()))
+            .build();
+
+        return OpenAiEmbeddingModel.builder()
+            .openAiClient(openAiClient)
+            .metadataMode(MetadataMode.EMBED)
+            .options(options)
+            .observationRegistry(observationRegistry != null ? observationRegistry : ObservationRegistry.NOOP)
+            .build();
+    }
+
+    private OpenAiChatModel buildChatModelFromParams(String baseUrl, String apiKey,
+                                                     String model, Double temperature) {
+        ProviderSnapshot config = new ProviderSnapshot(
+            "card", baseUrl, apiKey, model, null, null, false, temperature);
+        return buildChatModel(config);
     }
     /*
     Plain Client = ChatModel + SafeGuardAdvisor → 纯文本/JSON 输出，零工具能力
@@ -281,12 +418,12 @@ public class LlmProviderRegistry {
     private OpenAiChatModel getChatModel(String providerId) {
         return chatModelCache.computeIfAbsent(providerId, id -> {
             log.info("[LlmProviderRegistry] Creating new ChatModel for provider: {}", id);
-            return buildChatModel(id);
+            return buildChatModel(loadProviderOrThrow(id));
         });
     }
 
-    private OpenAiChatModel buildChatModel(String providerId) {
-        ProviderSnapshot config = loadProviderOrThrow(providerId);
+    private OpenAiChatModel buildChatModel(ProviderSnapshot config) {
+        String providerId = config.id();
         log.info("[LlmProviderRegistry] Building ChatModel - Provider: {}, BaseUrl: {}, Model: {}",
                  providerId, config.baseUrl(), config.model());
 
@@ -499,7 +636,7 @@ public class LlmProviderRegistry {
     }
 
     private boolean isBlank(String value) {
-        return value == null || value.isBlank();
+        return StringUtil.isBlank(value);
     }
 
     private Integer resolveEmbeddingDimensions(Integer configuredDimensions) {

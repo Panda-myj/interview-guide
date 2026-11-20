@@ -84,8 +84,8 @@ dependencies {
     // 号码认证服务（短信认证）：个人实名主体可用，预置签名与模板，支持自定义验证码
     implementation libs.aliyun.pnvs
 
-    // Jakarta annotation for Java 21+ (replaces javax.annotation)
-    implementation 'jakarta.annotation:jakarta.annotation-api:2.1.1'
+    // 版本交由 Spring Boot BOM 管理，避免把 Jakarta EE 11 注解降级到 2.1.1 (EE 10)
+    implementation 'jakarta.annotation:jakarta.annotation-api'
 
     // Lombok
     compileOnly libs.lombok
@@ -170,12 +170,12 @@ tasks.named('jacocoTestReport') {
             def total = covered + missed
             def percent = total == 0 ? 0.0d : (covered * 100.0d / total)
             logger.lifecycle(String.format('[coverage] %-11s %6.2f%%  covered=%d missed=%d',
-                    type, percent, covered, total))
+                    type, percent, covered, missed))
         }
     }
 }
 
-// 将仓库根目录 .env 注入 bootRun，便于本地加载 AI_BAILIAN_API_KEY 等变量（Gradle 进程默认不读 .env）
+// 将仓库根目录 .env 注入 bootRun，便于本地加载 PROVIDER_DASHSCOPE_API_KEY 等变量（Gradle 进程默认不读 .env）
 // 同时确保 JVM 使用 UTF-8 编码
 tasks.named('bootRun') {
     // JVM 编码配置（stdout/stderr：JDK 18+，避免控制台 PrintStream 与 Logback UTF-8 不一致）

@@ -1,12 +1,12 @@
 package interview.guide.modules.resume.service;
 
-import interview.guide.common.ai.LlmProviderRegistry;
 import interview.guide.common.ai.StructuredOutputInvoker;
 import interview.guide.common.exception.BusinessException;
 import interview.guide.common.exception.ErrorCode;
 import interview.guide.modules.interview.model.ResumeAnalysisResponse;
 import interview.guide.modules.interview.model.ResumeAnalysisResponse.ScoreDetail;
 import interview.guide.modules.interview.model.ResumeAnalysisResponse.Suggestion;
+import interview.guide.modules.llmprovider.service.UserLlmConfigService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -30,7 +30,7 @@ public class ResumeGradingService {
     
     private static final Logger log = LoggerFactory.getLogger(ResumeGradingService.class);
     
-    private final LlmProviderRegistry llmProviderRegistry;
+    private final UserLlmConfigService userLlmConfigService;
     private final PromptTemplate systemPromptTemplate;
     private final PromptTemplate userPromptTemplate;
     private final BeanOutputConverter<ResumeAnalysisResponseDTO> outputConverter;
@@ -61,11 +61,11 @@ public class ResumeGradingService {
     ) {}
     
     public ResumeGradingService(
-            LlmProviderRegistry llmProviderRegistry,
+            UserLlmConfigService userLlmConfigService,
             StructuredOutputInvoker structuredOutputInvoker,
             ResumeAnalysisProperties properties,
             ResourceLoader resourceLoader) throws IOException {
-        this.llmProviderRegistry = llmProviderRegistry;
+        this.userLlmConfigService = userLlmConfigService;
         this.structuredOutputInvoker = structuredOutputInvoker;
         this.systemPromptTemplate = new PromptTemplate(
             resourceLoader.getResource(properties.getSystemPromptPath())
@@ -84,7 +84,7 @@ public class ResumeGradingService {
      * @param resumeText 简历文本内容
      * @return 分析结果
      */
-    public ResumeAnalysisResponse analyzeResume(String resumeText) {
+    public ResumeAnalysisResponse analyzeResume(Long userId, String resumeText) {
         log.info("开始分析简历，文本长度: {} 字符", resumeText.length());
         
         try {
@@ -100,7 +100,8 @@ public class ResumeGradingService {
             String systemPromptWithFormat = systemPrompt + "\n\n" + outputConverter.getFormat();
             
             // 调用AI
-            ChatClient chatClient = llmProviderRegistry.getDefaultChatClient();
+            // 使用简历归属用户自己的大模型配置
+            ChatClient chatClient = userLlmConfigService.requireChatClientForUser(userId);
             ResumeAnalysisResponseDTO dto = structuredOutputInvoker.invoke(
                 chatClient,
                 systemPromptWithFormat,

@@ -73,7 +73,7 @@ import java.util.regex.Pattern;
  * <ul>
  *   <li>Provider API Key 只以 AES-GCM 密文保存在数据库（{@code llm_provider.api_key_*}），是本服务的唯一主路径。</li>
  *   <li>默认不写 {@code .env}，也不生成任何含明文密钥的文件；本类没有写 ENV 的代码路径。</li>
- *   <li>ASR/TTS 的 API Key 只在当前进程内存中生效，重启后需通过 {@code AI_BAILIAN_API_KEY} 环境变量提供。</li>
+ *   <li>ASR/TTS 的 API Key 只在当前进程内存中生效，重启后需通过 {@code PROVIDER_DASHSCOPE_API_KEY} 环境变量提供。</li>
  *   <li>仅在显式配置 {@code app.ai.config-yaml-path} 时，才会把非敏感字段写入受限目录下的本机文件：
  *       原子替换、POSIX 0600、目录 0700、跨进程 {@link FileChannel} 文件锁，且只写 {@code ${ENV}} 占位符。</li>
  * </ul>
@@ -82,7 +82,7 @@ import java.util.regex.Pattern;
  * <ul>
  *   <li>{@code registry.reload()} 只清空当前 JVM 的 ChatClient/ChatModel 缓存，不广播。</li>
  *   <li>其他实例会继续持有旧客户端（旧 baseUrl、旧密钥），直到重启或调用
- *       {@code POST /api/llm-providers/reload} 手动刷新；数据库始终是唯一真相。</li>
+ *       {@code POST /api/llm-provider/reload} 手动刷新；数据库始终是唯一真相。</li>
  *   <li>刷新只影响“下一次取用”，不做连通性校验；新配置不可用会在下次调用时抛
  *       {@code PROVIDER_CONFIG_READ_FAILED}，需回滚配置或修正密钥。</li>
  *   <li>刷新失败不会回滚已提交的数据库写入，只记录 WARN，避免热加载故障放大成写入故障。</li>
@@ -103,10 +103,12 @@ public class LlmProviderConfigService {
   private static final Pattern PLAINTEXT_API_KEY_LINE =
       Pattern.compile("^(\\s*api-key:\\s*)(\\S.*)$");
   private static final String DEFAULT_PROVIDER_ENV_KEY = "APP_AI_PROVIDER_API_KEY";
-  private static final String BAILIAN_ENV_KEY = "AI_BAILIAN_API_KEY";
+  private static final String DASHSCOPE_ENV_KEY = "PROVIDER_DASHSCOPE_API_KEY";
   private static final int PROVIDER_CONNECT_TIMEOUT_SECONDS = 5;
   private static final int PROVIDER_READ_TIMEOUT_SECONDS = 10;
   private static final int ASR_CONNECT_TIMEOUT_MS = 5000;
+  /** 实时 ASR 走 WebSocket 协议，模型名必须以该后缀结尾；离线模型会被服务端按文本生成处理并断开连接。 */
+  private static final String ASR_REALTIME_MODEL_SUFFIX = "-realtime";
 
   private final LlmProviderProperties properties;
   private final LlmProviderRegistry registry;
@@ -333,13 +335,57 @@ public class LlmProviderConfigService {
     }
   }
 
+  /**
+   * 用户个人配置的连通性测试：不经过数据库 Provider 体系，直接按给定参数测试。
+   * 复用与全局 Provider 相同的 SSRF 校验、超时与候选端点探测逻辑。
+   */
+  public ProviderTestResult testProviderRuntime(String baseUrl, String apiKey, String model) {
+    rwLock.readLock().lock();
+    try {
+      ProviderRuntimeConfig config = new ProviderRuntimeConfig(
+          baseUrl, apiKey, model, null, null, false, null);
+      return doTestProvider(config, "user-llm-config");
+    } finally {
+      rwLock.readLock().unlock();
+    }
+  }
+
+  /**
+   * 实时 ASR 模型名的确定性校验：只接受以 {@code -realtime} 结尾的模型。
+   * 单独抽成纯函数供连通性测试与单元测试共用，避免把「TCP 连通」误报为「ASR 可用」。
+   */
+  static boolean isRealtimeAsrModel(String model) {
+    return model != null && model.trim().endsWith(ASR_REALTIME_MODEL_SUFFIX);
+  }
+
   public ProviderTestResult testAsrConfig() {
     rwLock.readLock().lock();
     try {
       VoiceInterviewProperties.AsrConfig asr = voiceProperties.getQwen().getAsr();
-      String url = asr.getUrl();
+      return testAsrRuntime(asr.getUrl(), asr.getModel());
+    } finally {
+      rwLock.readLock().unlock();
+    }
+  }
+
+  /**
+   * 用户级 ASR 配置连通性测试：与全局测试共用 SSRF 校验与 TCP 探测逻辑。
+   */
+  public ProviderTestResult testAsrRuntime(String url, String model) {
+    rwLock.readLock().lock();
+    try {
       try {
+        // 地址安全校验优先，避免模型名错误时绕过 SSRF 防护。
         URI wsUri = ProviderEndpointValidator.requireWebSocketEndpoint(url, allowLocalEndpoints());
+        if (!isRealtimeAsrModel(model)) {
+          log.warn("ASR 模型不适用于实时 WebSocket 端点: model={}", model);
+          return ProviderTestResult.builder()
+              .success(false)
+              .message("ASR 模型 '" + model + "' 不适用于实时 WebSocket 端点，请使用以 "
+                  + ASR_REALTIME_MODEL_SUFFIX + " 结尾的模型（如 qwen3-asr-flash-realtime）")
+              .model(model)
+              .build();
+        }
         String host = wsUri.getHost();
         int port = wsUri.getPort() > 0
             ? wsUri.getPort()
@@ -351,22 +397,22 @@ public class LlmProviderConfigService {
         }
         return ProviderTestResult.builder()
             .success(true)
-            .message("ASR WebSocket 连接成功: " + host)
-            .model(asr.getModel())
+            .message("ASR 端点 TCP 连通（模型名格式已校验，未验证鉴权与协议握手）: " + host)
+            .model(model)
             .build();
       } catch (BusinessException e) {
         log.warn("ASR 地址未通过安全检查: url={}, reason={}", url, e.getMessage());
         return ProviderTestResult.builder()
             .success(false)
             .message("ASR 连接被拒绝: " + e.getMessage())
-            .model(asr.getModel())
+            .model(model)
             .build();
       } catch (IOException e) {
         log.warn("ASR 连接失败: url={}, reason={}", url, e.getMessage());
         return ProviderTestResult.builder()
             .success(false)
             .message("ASR 连接失败: " + e.getMessage())
-            .model(asr.getModel())
+            .model(model)
             .build();
       }
     } finally {
@@ -1043,7 +1089,7 @@ public class LlmProviderConfigService {
       LinkedHashMap<String, Object> values = new LinkedHashMap<>();
       values.put("url", asr.getUrl());
       values.put("model", asr.getModel());
-      values.put("api-key", "${" + BAILIAN_ENV_KEY + "}");
+      values.put("api-key", "${" + DASHSCOPE_ENV_KEY + "}");
       values.put("language", asr.getLanguage());
       values.put("format", asr.getFormat());
       values.put("sample-rate", asr.getSampleRate());
@@ -1059,7 +1105,7 @@ public class LlmProviderConfigService {
     mutateRuntimeConfig(ErrorCode.VOICE_CONFIG_WRITE_FAILED, "写入 TTS 配置失败", false, editor -> {
       LinkedHashMap<String, Object> values = new LinkedHashMap<>();
       values.put("model", tts.getModel());
-      values.put("api-key", "${" + BAILIAN_ENV_KEY + "}");
+      values.put("api-key", "${" + DASHSCOPE_ENV_KEY + "}");
       values.put("voice", tts.getVoice());
       values.put("format", tts.getFormat());
       values.put("sample-rate", tts.getSampleRate());
@@ -1294,7 +1340,7 @@ public class LlmProviderConfigService {
       return toEnvKey(ancestors.get(ancestors.size() - 1));
     }
     if (ancestors.contains("qwen")) {
-      return BAILIAN_ENV_KEY;
+      return DASHSCOPE_ENV_KEY;
     }
     return DEFAULT_PROVIDER_ENV_KEY;
   }

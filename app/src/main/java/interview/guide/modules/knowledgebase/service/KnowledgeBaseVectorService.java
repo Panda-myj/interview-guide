@@ -94,7 +94,7 @@ public class KnowledgeBaseVectorService {
             }
             jobId = UUID.randomUUID().toString();
             log.info("开始向量化知识库: kbId={}, jobId={}, contentLength={}",
-                knowledgeBaseId, jobId, content.length());
+                knowledgeBaseId, jobId, content == null ? 0 : content.length());
 
             // 1. 将文本分块
             List<Document> chunks = textSplitter.apply(

@@ -102,6 +102,7 @@ public class VoiceSessionAuditLogger {
     public enum Event {
         SESSION_CONNECTED,
         CONNECTION_REJECTED_DUPLICATE,
+        CONNECTION_REJECTED_COMPLETED,
         CONNECTION_CLOSED_STALE,
         LEASE_ACQUIRED,
         LEASE_DEGRADED,

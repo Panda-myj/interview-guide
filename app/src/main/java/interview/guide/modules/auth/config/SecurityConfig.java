@@ -6,8 +6,11 @@ import interview.guide.common.result.Result;
 import interview.guide.modules.auth.model.UserRole;
 import interview.guide.modules.auth.security.AuthPrincipal;
 import interview.guide.modules.auth.security.ActiveUserFilter;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.Environment;
+import org.springframework.core.env.Profiles;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.security.authentication.AbstractAuthenticationToken;
@@ -25,6 +28,7 @@ import java.util.List;
 
 @Configuration
 @EnableMethodSecurity
+@Slf4j
 public class SecurityConfig {
 
     @Bean
@@ -40,18 +44,19 @@ public class SecurityConfig {
             .formLogin(form -> form.disable())
             .httpBasic(basic -> basic.disable())
             .logout(logout -> logout.disable())
-            .authorizeHttpRequests(authorize -> authorize
-                .requestMatchers(
+            .authorizeHttpRequests(authorize -> {
+                authorize.requestMatchers(
                     "/api/auth/sms/**",
                     "/api/auth/login/**",
                     "/api/auth/refresh",
                     "/actuator/health",
                     "/actuator/health/**"
-                ).permitAll()
-                .requestMatchers("/api/llm-provider/**").hasRole("ADMIN")
-                .requestMatchers("/api/**").authenticated()
-                .anyRequest().permitAll()
-            )
+                ).permitAll();
+                // 模型配置已统一为用户级（/api/user-llm-provider），与其它业务接口一样
+                // 走 /api/** authenticated 规则，不再有管理员专用的模型配置入口。
+                authorize.requestMatchers("/api/**").authenticated();
+                authorize.anyRequest().permitAll();
+            })
             .exceptionHandling(exceptions -> exceptions
                 .authenticationEntryPoint((request, response, exception) -> {
                     response.setStatus(HttpStatus.UNAUTHORIZED.value());
@@ -78,6 +83,11 @@ public class SecurityConfig {
             .addFilterAfter(activeUserFilter, BearerTokenAuthenticationFilter.class);
         return http.build();
     }
+
+    /**
+     * 本地开发态开关保留属性校验（见 AuthBootstrapValidator），但不再绑定任何放行规则：
+     * 模型配置已统一为用户级接口，匿名调试可通过 mock 登录获取 token 完成。
+     */
 
     private AbstractAuthenticationToken toAuthentication(Jwt jwt) {
         Long userId = Long.valueOf(jwt.getSubject());

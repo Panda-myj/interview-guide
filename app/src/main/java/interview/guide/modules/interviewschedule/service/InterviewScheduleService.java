@@ -84,7 +84,7 @@ public class InterviewScheduleService {
                 ownerUserId, start, end, pageRequest.withSort(Sort.by(Sort.Direction.ASC, "interviewTime")));
         } else if (status != null) {
             entities = repository.findByOwnerUserIdAndStatus(
-                ownerUserId, InterviewStatus.valueOf(status), pageRequest.withSort(
+                ownerUserId, parseInterviewStatus(status), pageRequest.withSort(
                     Sort.by(Sort.Direction.ASC, "interviewTime")));
         } else {
             entities = repository.findAllByOwnerUserIdOrderByInterviewTimeAsc(ownerUserId, pageRequest);
@@ -115,5 +115,16 @@ public class InterviewScheduleService {
         InterviewScheduleDTO dto = new InterviewScheduleDTO();
         BeanUtils.copyProperties(entity, dto);
         return dto;
+    }
+
+    /**
+     * 安全解析状态枚举：非法值按 BAD_REQUEST 处理，避免 IllegalArgumentException 直接变成 500。
+     */
+    private InterviewStatus parseInterviewStatus(String status) {
+        try {
+            return InterviewStatus.valueOf(status);
+        } catch (IllegalArgumentException e) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "非法的面试状态: " + status);
+        }
     }
 }

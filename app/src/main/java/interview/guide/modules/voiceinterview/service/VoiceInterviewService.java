@@ -31,7 +31,9 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
@@ -226,14 +228,23 @@ public class VoiceInterviewService {
             return null;
         }
 
-        // Try cache first
+        // Try cache first。缓存反序列化失败（例如旧版本写入的含 Hibernate 代理对象）时
+        // 必须降级到数据库，而不是让整个请求抛出 500。
         String cacheKey = getSessionCacheKey(sessionId);
-        RBucket<VoiceInterviewSessionEntity> bucket = redissonClient.getBucket(cacheKey);
-        VoiceInterviewSessionEntity cached = bucket.get();
-
-        if (cached != null) {
-            log.debug("Session {} found in cache", sessionId);
-            return cached;
+        try {
+            RBucket<VoiceInterviewSessionEntity> bucket = redissonClient.getBucket(cacheKey);
+            VoiceInterviewSessionEntity cached = bucket.get();
+            if (cached != null) {
+                log.debug("Session {} found in cache", sessionId);
+                return cached;
+            }
+        } catch (Exception e) {
+            log.warn("Failed to read cached session {}, falling back to database: {}", sessionId, e.getMessage());
+            try {
+                redissonClient.getBucket(cacheKey).delete();
+            } catch (Exception ignore) {
+                log.debug("Failed to delete corrupt session cache key {}", cacheKey);
+            }
         }
 
         // Fallback to database
@@ -243,6 +254,22 @@ public class VoiceInterviewService {
     public VoiceInterviewSessionEntity requireOwned(Long sessionId) {
         return sessionRepository.findByIdAndOwnerUserId(sessionId, currentUserService.getRequiredUserId())
             .orElseThrow(() -> new BusinessException(ErrorCode.VOICE_SESSION_NOT_FOUND, "语音面试会话不存在"));
+    }
+
+    /**
+     * 直接读库获取会话状态（绕过 Redis 快照），供 WebSocket 接入前判定会话是否已收尾。
+     *
+     * <p>必须读库：镜像在缓存里的快照可能是结束前的旧状态，用它判断会放过对已结束会话的连接。</p>
+     *
+     * @return 会话状态；会话不存在时返回 null
+     */
+    public VoiceInterviewSessionStatus getStatusFromDatabase(Long sessionId) {
+        if (sessionId == null) {
+            return null;
+        }
+        return sessionRepository.findById(sessionId)
+            .map(VoiceInterviewSessionEntity::getStatus)
+            .orElse(null);
     }
 
     /**
@@ -294,9 +321,13 @@ public class VoiceInterviewService {
         }
 
         VoiceInterviewSessionEntity.InterviewPhase oldPhase = session.getCurrentPhase();
-        session.setCurrentPhase(newPhase);
-        sessionRepository.save(session);
-        cacheSession(session); // Update cache
+        // 状态变更必须基于数据库里的托管实体：缓存命中的是脱离持久化上下文的快照，
+        // 直接 save() 可能因 ownerUser 只有 id 的裁剪对象引发关联覆盖等问题。
+        VoiceInterviewSessionEntity managed = sessionRepository.findById(sessionIdLong)
+            .orElse(session);
+        managed.setCurrentPhase(newPhase);
+        sessionRepository.save(managed);
+        cacheSession(managed); // Update cache
 
         log.info("Session {} transitioned from phase {} to {}", sessionId, oldPhase, newPhase);
     }
@@ -503,13 +534,22 @@ public class VoiceInterviewService {
 
         List<VoiceInterviewSessionEntity> sessions;
         if (status != null && !status.isEmpty()) {
-            VoiceInterviewSessionStatus statusEnum =
-                VoiceInterviewSessionStatus.valueOf(status.toUpperCase());
+            VoiceInterviewSessionStatus statusEnum = parseSessionStatus(status);
             sessions = sessionRepository.findAllByOwnerUserIdAndStatusOrderByUpdatedAtDesc(
                 parseOwnerUserId(ownerUserId), statusEnum
             );
         } else {
             sessions = sessionRepository.findAllByOwnerUserIdOrderByUpdatedAtDesc(parseOwnerUserId(ownerUserId));
+        }
+
+        // 批量取回消息数，避免列表页逐个会话 count 造成 N+1 查询
+        Map<Long, Long> messageCounts = new HashMap<>();
+        if (!sessions.isEmpty()) {
+            List<Long> sessionIds = sessions.stream()
+                .map(VoiceInterviewSessionEntity::getId)
+                .toList();
+            messageRepository.countBySessionIds(sessionIds).forEach(row ->
+                messageCounts.put((Long) row[0], (Long) row[1]));
         }
 
         return sessions.stream()
@@ -521,7 +561,7 @@ public class VoiceInterviewService {
                 .createdAt(session.getCreatedAt())
                 .updatedAt(session.getUpdatedAt())
                 .actualDuration(session.getActualDuration())
-                .messageCount(messageRepository.countBySessionId(session.getId()))
+                .messageCount(messageCounts.getOrDefault(session.getId(), 0L))
                 .evaluateStatus(session.getEvaluateStatus() != null ? session.getEvaluateStatus().name() : null)
                 .evaluateError(session.getEvaluateError())
                 .build())
@@ -811,13 +851,65 @@ public class VoiceInterviewService {
     }
 
     /**
-     * Cache session in Redis
+     * Cache session in Redis。
+     *
+     * <p>不能把 JPA 托管实体直接交给 Redisson 的 Kryo5 codec：{@code ownerUser} 是
+     * LAZY 关联的 Hibernate 代理（ByteBuddyInterceptor），Kryo 反射其内部字段时会触发
+     * Java 21 的模块访问限制（InaccessibleObjectException: java.lang.reflect），
+     * 导致创建/恢复会话抛 500。这里只缓存一份去掉代理的快照实体，
+     * 仅保留业务需要的标量字段与 ownerUser.id。</p>
+     *
+     * <p>缓存是加速手段而非数据源，写入失败只告警、不中断面试主流程。</p>
      */
     private void cacheSession(VoiceInterviewSessionEntity session) {
         String cacheKey = getSessionCacheKey(session.getId());
-        RBucket<VoiceInterviewSessionEntity> bucket = redissonClient.getBucket(cacheKey);
-        bucket.set(session, Duration.ofHours(CACHE_TTL_HOURS));
-        log.debug("Cached session: {}", session.getId());
+        try {
+            VoiceInterviewSessionEntity snapshot = toCacheableSnapshot(session);
+            RBucket<VoiceInterviewSessionEntity> bucket = redissonClient.getBucket(cacheKey);
+            bucket.set(snapshot, Duration.ofHours(CACHE_TTL_HOURS));
+            log.debug("Cached session: {}", session.getId());
+        } catch (Exception e) {
+            log.warn("Failed to cache session {} (cache disabled for this session): {}",
+                session.getId(), e.getMessage());
+        }
+    }
+
+    /** 构造不含 Hibernate 代理、可被 Kryo5 安全序列化的会话快照 */
+    private VoiceInterviewSessionEntity toCacheableSnapshot(VoiceInterviewSessionEntity s) {
+        UserEntity owner = null;
+        if (s.getOwnerUser() != null) {
+            // 只取 id 构造一个普通 POJO，绝不把 HibernateProxy 放进快照。
+            // 业务侧对该字段仅使用 getId()。
+            owner = new UserEntity();
+            owner.setId(s.getOwnerUser().getId());
+        }
+        return VoiceInterviewSessionEntity.builder()
+            .id(s.getId())
+            .ownerUser(owner)
+            .roleType(s.getRoleType())
+            .skillId(s.getSkillId())
+            .difficulty(s.getDifficulty())
+            .customJdText(s.getCustomJdText())
+            .resumeId(s.getResumeId())
+            .introEnabled(s.getIntroEnabled())
+            .techEnabled(s.getTechEnabled())
+            .projectEnabled(s.getProjectEnabled())
+            .hrEnabled(s.getHrEnabled())
+            .llmProvider(s.getLlmProvider())
+            .currentPhase(s.getCurrentPhase())
+            .status(s.getStatus())
+            .plannedDuration(s.getPlannedDuration())
+            .actualDuration(s.getActualDuration())
+            .startTime(s.getStartTime())
+            .endTime(s.getEndTime())
+            .createdAt(s.getCreatedAt())
+            .updatedAt(s.getUpdatedAt())
+            .pausedAt(s.getPausedAt())
+            .resumedAt(s.getResumedAt())
+            .evaluateStatus(s.getEvaluateStatus())
+            .evaluateError(s.getEvaluateError())
+            .evaluateAttempt(s.getEvaluateAttempt())
+            .build();
     }
 
     /**
@@ -856,7 +948,19 @@ public class VoiceInterviewService {
         try {
             return Long.parseLong(ownerUserId);
         } catch (NumberFormatException e) {
-            throw new BusinessException(ErrorCode.NOT_FOUND, "用户不存在");
+            // 格式错误属于请求参数问题，与 startPhase 等场景对齐使用 BAD_REQUEST
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "无效的用户标识: " + ownerUserId);
+        }
+    }
+
+    /**
+     * 安全解析会话状态枚举，非法值按 BAD_REQUEST 处理，与 startPhase 的枚举解析方式一致。
+     */
+    private VoiceInterviewSessionStatus parseSessionStatus(String status) {
+        try {
+            return VoiceInterviewSessionStatus.valueOf(status.toUpperCase());
+        } catch (IllegalArgumentException e) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "无效的会话状态: " + status);
         }
     }
 
@@ -875,7 +979,11 @@ public class VoiceInterviewService {
         for (VoiceInterviewSessionEntity session : staleSessions) {
             log.info("Cleaning up stale IN_PROGRESS session {}, started at {}",
                 session.getId(), session.getStartTime());
-            endSession(session);
+            // 与 endSessionIfInProgress / 孤儿对账保持一致：结束时同步入队评估，
+            // 否则超时中断的会话永远停留在 COMPLETED 且无评估结果
+            if (endSession(session) && claimPendingForEvaluation(session.getId())) {
+                sendEvaluateTaskAfterCommit(session.getId());
+            }
             cleaned++;
         }
 

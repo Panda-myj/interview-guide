@@ -2,6 +2,7 @@ package interview.guide.common.async;
 
 import interview.guide.common.constant.AsyncTaskStreamConstants;
 import interview.guide.common.model.AsyncTaskStatus;
+import interview.guide.common.util.StringUtil;
 import interview.guide.infrastructure.redis.RedisService;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -217,14 +218,33 @@ public abstract class AbstractStreamConsumer<T> {
             log.info("{} task completed: {}", taskDisplayName(), payloadIdentifier(payload));
         } catch (Exception e) {
             log.error("{} task failed: {}", taskDisplayName(), payloadIdentifier(payload), e);
+            boolean retried = false;
             if (retryCount < AsyncTaskStreamConstants.MAX_RETRY_COUNT) {
-                retryMessage(payload, retryCount + 1);
-            } else {
+                retried = retryMessageSafely(payload, retryCount + 1);
+            }
+            if (!retried) {
+                // 重试未成功（超过上限或重新入队失败）：标记最终失败，保证消息不无限回环
                 markFailed(payload, truncateError(
                     taskDisplayName() + " failed after retry " + retryCount + ": " + e.getMessage()
                 ));
             }
+            // 无论重试还是终态失败，处理完必须 ACK，否则 Pending 消息会被反复认领形成死循环
             ackMessage(messageId);
+        }
+    }
+
+    /**
+     * 尝试重新入队，失败不向上抛：重新入队本身失败（如 Redis 抖动）时返回 false，
+     * 由调用方降级为 markFailed 并 ACK，避免原消息滞留 Pending 导致无限重处理。
+     */
+    private boolean retryMessageSafely(T payload, int nextRetryCount) {
+        try {
+            retryMessage(payload, nextRetryCount);
+            return true;
+        } catch (Exception retryEx) {
+            log.error("{} task failed to requeue for retry {}: {}",
+                taskDisplayName(), nextRetryCount, payloadIdentifier(payload), retryEx);
+            return false;
         }
     }
 
@@ -240,10 +260,7 @@ public abstract class AbstractStreamConsumer<T> {
     }
 
     protected String truncateError(String error) {
-        if (error == null) {
-            return null;
-        }
-        return error.length() > 500 ? error.substring(0, 500) : error;
+        return StringUtil.truncate(error, 500);
     }
 
     /**

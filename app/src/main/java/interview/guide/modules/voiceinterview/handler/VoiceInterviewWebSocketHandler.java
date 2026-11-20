@@ -7,6 +7,9 @@ import interview.guide.modules.voiceinterview.dto.WebSocketControlMessage;
 import interview.guide.modules.voiceinterview.dto.WebSocketSubtitleMessage;
 import interview.guide.modules.voiceinterview.model.VoiceInterviewMessageEntity;
 import interview.guide.modules.voiceinterview.model.VoiceInterviewSessionEntity;
+import interview.guide.modules.voiceinterview.model.VoiceInterviewSessionStatus;
+import interview.guide.modules.llmprovider.service.UserLlmConfigService;
+import interview.guide.modules.llmprovider.service.VoiceRuntime;
 import interview.guide.modules.voiceinterview.config.VoiceInterviewProperties;
 import interview.guide.modules.voiceinterview.service.QwenAsrService;
 import interview.guide.modules.voiceinterview.service.QwenTtsService;
@@ -71,6 +74,7 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
     private final VoiceSessionFinalizer sessionFinalizer;
     private final VoiceSessionAuditLogger auditLogger;
     private final VoiceInterviewProperties voiceInterviewProperties;
+    private final UserLlmConfigService userLlmConfigService;
     private final ObjectProvider<MeterRegistry> meterRegistryProvider;
 
     /**
@@ -158,6 +162,19 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
         }
 
         String connectionId = UUID.randomUUID().toString();
+
+        // 已收尾的会话不再接受新连接：收尾时评估任务已经入队（基于当时的对话），
+        // 此时再连上来只会把新对话写进一个已结束的会话，评估结果永远追不上。
+        VoiceInterviewSessionStatus currentStatus = interviewService.getStatusFromDatabase(parseSessionId(sessionId));
+        if (currentStatus == VoiceInterviewSessionStatus.COMPLETED) {
+            auditLogger.record(sessionId, VoiceSessionAuditLogger.Event.CONNECTION_REJECTED_COMPLETED,
+                connectionId, "status=COMPLETED");
+            log.info("Reject WebSocket connection for completed session: {}", sessionId);
+            sendControl(session, "session_ended", "本次面试已结束，请在面试记录中查看评估结果");
+            session.close(CloseStatus.NORMAL);
+            return;
+        }
+
         LeaseAttempt leaseAttempt = leaseService.acquire(sessionId, connectionId);
         if (leaseAttempt.rejected()) {
             String holder = leaseAttempt.lease() == null ? "-" : leaseAttempt.lease().connectionId();
@@ -180,7 +197,17 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
         );
 
         sessions.put(sessionId, safeSession);
-        sessionStates.put(sessionId, new SessionState(connectionId, fencingToken));
+        SessionState connectionState = new SessionState(connectionId, fencingToken);
+        VoiceInterviewSessionEntity connectedEntity = getSessionEntity(sessionId);
+        if (connectedEntity != null) {
+            try {
+                connectionState.setVoiceRuntime(userLlmConfigService.resolveVoiceRuntimeOrNull(
+                    connectedEntity.getOwnerUser().getId()));
+            } catch (Exception e) {
+                log.warn("Failed to resolve user voice config for session {}: {}", sessionId, e.getMessage());
+            }
+        }
+        sessionStates.put(sessionId, connectionState);
         lastActivityTime.put(sessionId, System.currentTimeMillis());
         log.info("WebSocket connection established for session: {}, connectionId: {}", sessionId, connectionId);
 
@@ -300,7 +327,7 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
                 sendTextMessage(session, aiReply, true);
 
                 // 语音随后下发
-                byte[] wavAudio = getOpeningWavAudio(aiReply);
+                byte[] wavAudio = getOpeningWavAudio(sessionId, aiReply);
                 if (wavAudio.length > 0 && session.isOpen()) {
                     sendAudio(session, wavAudio, aiReply);
                 } else if (session.isOpen()) {
@@ -314,20 +341,30 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
         });
     }
 
-    private byte[] getOpeningWavAudio(String text) {
+    private byte[] getOpeningWavAudio(String sessionId, String text) {
         byte[] cached = openingAudioCache.get(text);
         if (cached != null && cached.length > 0) {
             return cached;
         }
-        byte[] wav = synthesizeToWav(text);
+        byte[] wav = synthesizeToWav(sessionId, text);
         if (wav.length > 0) {
             openingAudioCache.put(text, wav);
         }
         return wav;
     }
 
+    /** 全局缓存预热使用系统默认语音配置 */
     private byte[] synthesizeToWav(String text) {
         byte[] pcm = ttsService.synthesize(text);
+        if (pcm == null || pcm.length == 0) {
+            return new byte[0];
+        }
+        return convertPcmToWav(pcm);
+    }
+
+    /** 会话内合成使用会话归属用户自己的语音配置 */
+    private byte[] synthesizeToWav(String sessionId, String text) {
+        byte[] pcm = ttsService.synthesize(text, ttsRuntimeOf(sessionId));
         if (pcm == null || pcm.length == 0) {
             return new byte[0];
         }
@@ -476,6 +513,9 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
             return;
         }
 
+        // 先标记关闭再中断：LLM 管线被打断后会拿到降级兜底文案，
+        // 该文案不能当作面试官提问落库，否则评估会把「服务不可用」当成一道题来打分。
+        removedState.markClosing();
         Thread processingThread = removedState.getProcessingThread();
         if (processingThread != null) {
             processingThread.interrupt();
@@ -549,6 +589,7 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
         WebSocketSession session = sessions.remove(sessionId);
         sessionStates.remove(sessionId);
         lastActivityTime.remove(sessionId);
+        state.markClosing();
 
         if (session != null && session.isOpen()) {
             try {
@@ -601,7 +642,8 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
                 text -> handleSttResult(sessionId, text, true),
                 text -> handleSttResult(sessionId, text, false),
                 () -> sendAsrReady(session),
-                error -> handleAsrError(sessionId, session, error)
+                error -> handleAsrError(sessionId, session, error),
+                asrRuntimeOf(sessionId)
         );
 
         scheduleAsrReadyCheck(sessionId, session, 0);
@@ -677,7 +719,8 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
                 text -> handleSttResult(sessionId, text, true),
                 text -> handleSttResult(sessionId, text, false),
                 () -> sendAsrReady(session),
-                error -> handleAsrError(sessionId, session, error)
+                error -> handleAsrError(sessionId, session, error),
+                asrRuntimeOf(sessionId)
         );
     }
 
@@ -900,7 +943,7 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
                         ttsSemaphore.acquireUninterruptibly();
                         CompletableFuture<byte[]> future = CompletableFuture.supplyAsync(() -> {
                             try {
-                                return ttsService.synthesize(sentence);
+                                return ttsService.synthesize(sentence, ttsRuntimeOf(sessionId));
                             } finally {
                                 ttsSemaphore.release();
                             }
@@ -915,8 +958,9 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
                 incrementCounter("app.voice.interview.llm.calls", "status", "success", "streaming", "true");
                 log.info("LLM response for session {}: '{}'", sessionId, aiReply);
 
-                if (!session.isOpen()) {
-                    log.warn("WebSocket closed during LLM processing, discarding response for session {}", sessionId);
+                if (state.isClosing() || !session.isOpen()) {
+                    log.warn("WebSocket closed during LLM processing, keep user answer only for session {}", sessionId);
+                    persistUserAnswerOnly(sessionId, userText);
                     return;
                 }
 
@@ -935,7 +979,7 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
                             sessionId);
                         boolean fallbackSent = false;
                         try {
-                            byte[] fallbackPcm = ttsService.synthesize(aiReply);
+                            byte[] fallbackPcm = ttsService.synthesize(aiReply, ttsRuntimeOf(sessionId));
                             if (fallbackPcm != null && fallbackPcm.length > 0) {
                                 sendAudio(session, convertPcmToWav(fallbackPcm), aiReply);
                                 fallbackSent = true;
@@ -979,7 +1023,7 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
                         log.info("[Session: {}] All {} sentence TTS calls failed, falling back to full-text TTS",
                             sessionId, failedCount);
                         try {
-                            byte[] fallbackPcm = ttsService.synthesize(aiReply);
+                            byte[] fallbackPcm = ttsService.synthesize(aiReply, ttsRuntimeOf(sessionId));
                             if (fallbackPcm != null && fallbackPcm.length > 0) {
                                 byte[] wavAudio = convertPcmToWav(fallbackPcm);
                                 log.info("[Session: {}] Fallback TTS succeeded, WAV size: {} bytes",
@@ -1017,8 +1061,9 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
                 incrementCounter("app.voice.interview.llm.calls", "status", "success", "streaming", "false");
                 log.info("LLM response for session {}: '{}'", sessionId, aiReply);
 
-                if (!session.isOpen()) {
-                    log.warn("WebSocket closed during LLM processing, discarding response for session {}", sessionId);
+                if (state.isClosing() || !session.isOpen()) {
+                    log.warn("WebSocket closed during LLM processing, keep user answer only for session {}", sessionId);
+                    persistUserAnswerOnly(sessionId, userText);
                     return;
                 }
 
@@ -1029,7 +1074,7 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
                 long ttsStartNanos = System.nanoTime();
                 log.info("[Session: {}] Starting TTS synthesis for text (length: {})",
                     sessionId, aiReply.length());
-                byte[] aiAudio = ttsService.synthesize(aiReply);
+                byte[] aiAudio = ttsService.synthesize(aiReply, ttsRuntimeOf(sessionId));
                 recordTimerSinceNanos("app.voice.interview.tts.duration", ttsStartNanos, "status", "success");
 
                 if (!session.isOpen()) {
@@ -1055,7 +1100,7 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
             recordTimerSinceNanos("app.voice.interview.turn.duration", turnStartNanos, "status", "failure");
             incrementCounter("app.voice.interview.turn.completed", "status", "failure");
             incrementCounter("app.voice.interview.errors", "stage", "turn");
-            if (session.isOpen()) {
+            if (!state.isClosing() && session.isOpen()) {
                 sendError(session, "AI响应失败: " + e.getMessage());
             }
         } finally {
@@ -1261,7 +1306,7 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
             ttsSemaphore.acquireUninterruptibly();
             CompletableFuture<byte[]> future = CompletableFuture.supplyAsync(() -> {
                 try {
-                    return ttsService.synthesize(sentence);
+                    return ttsService.synthesize(sentence, ttsRuntimeOf(sessionId));
                 } finally {
                     ttsSemaphore.release();
                 }
@@ -1540,12 +1585,39 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
     /**
      * Get session entity from database
      */
+    private VoiceRuntime voiceRuntimeOf(String sessionId) {
+        SessionState state = sessionStates.get(sessionId);
+        return state == null ? null : state.getVoiceRuntime();
+    }
+
+    private VoiceRuntime.AsrRuntime asrRuntimeOf(String sessionId) {
+        VoiceRuntime rt = voiceRuntimeOf(sessionId);
+        return rt == null ? null : rt.asr();
+    }
+
+    private VoiceRuntime.TtsRuntime ttsRuntimeOf(String sessionId) {
+        VoiceRuntime rt = voiceRuntimeOf(sessionId);
+        return rt == null ? null : rt.tts();
+    }
+
     private VoiceInterviewSessionEntity getSessionEntity(String sessionId) {
         try {
             Long sessionIdLong = Long.parseLong(sessionId);
             return interviewService.getSession(sessionIdLong);
         } catch (NumberFormatException e) {
             log.error("Invalid session ID format: {}", sessionId);
+            return null;
+        }
+    }
+
+    /** 解析 URL 中的会话 ID；非法格式返回 null（由调用方决定如何处理）。 */
+    private static Long parseSessionId(String sessionId) {
+        if (sessionId == null) {
+            return null;
+        }
+        try {
+            return Long.parseLong(sessionId);
+        } catch (NumberFormatException e) {
             return null;
         }
     }
@@ -1560,6 +1632,20 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
         } catch (Exception e) {
             log.error("Error saving message for session {}", sessionId, e);
         }
+    }
+
+    /**
+     * 会话已结束（用户点结束 / 连接断开）时只保留用户这轮回答。
+     *
+     * <p>LLM 被打断后 DashScope 会返回「AI 服务暂时不可用」这类兜底文案，把它当面试官提问落库
+     * 会让评估多出一道“考生未作答”的题，因此这里只补写用户回答。</p>
+     *
+     * <p>先清掉线程中断标记：管线线程已被 {@code interrupt()} 打过，中断标记会让 Hikari
+     * 在获取连接时直接失败（Interrupted during connection acquisition），回答就丢了。</p>
+     */
+    private void persistUserAnswerOnly(String sessionId, String userText) {
+        Thread.interrupted();
+        saveMessage(sessionId, userText, null);
     }
 
     /**
@@ -1635,6 +1721,17 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
         private final String connectionId;
         /** 租约栅栏令牌：新连接接管后自增，旧连接的续期/释放会被拒绝 */
         private final long fencingToken;
+        /** 该会话归属用户的语音运行时配置；未配置语音时为 null（走系统默认） */
+        private volatile VoiceRuntime voiceRuntime;
+
+        VoiceRuntime getVoiceRuntime() {
+            return voiceRuntime;
+        }
+
+        void setVoiceRuntime(VoiceRuntime voiceRuntime) {
+            this.voiceRuntime = voiceRuntime;
+        }
+
         private final AtomicLong lastInboundAt = new AtomicLong(System.currentTimeMillis());
         private final AtomicLong lastHeartbeatPingAt = new AtomicLong(0);
         private final AtomicInteger protocolViolations = new AtomicInteger();
@@ -1654,6 +1751,8 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
         private final AtomicLong lastSttActivityAt = new AtomicLong(System.currentTimeMillis());
         /** 当前正在执行 LLM+TTS 管线的虚拟线程，断连时可中断 */
         private volatile Thread processingThread = null;
+        /** 连接已进入收尾流程：此时不再向前端推送，也不把降级兜底文案当作对话落库 */
+        private final AtomicBoolean closing = new AtomicBoolean(false);
 
         SessionState(String connectionId, long fencingToken) {
             this.connectionId = connectionId;
@@ -1797,6 +1896,14 @@ public class VoiceInterviewWebSocketHandler extends TextWebSocketHandler impleme
 
         void setProcessingThread(Thread t) {
             this.processingThread = t;
+        }
+
+        void markClosing() {
+            closing.set(true);
+        }
+
+        boolean isClosing() {
+            return closing.get();
         }
 
         public Thread getProcessingThread() {

@@ -18,7 +18,6 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: interview_guide
-      ACTUATOR_ENDPOINTS: health,info,metrics,prometheus
     volumes:
       # 数据持久化：确保容器重启或删除后，数据库数据不丢失
       - postgres_data:/var/lib/postgresql/data
@@ -55,62 +54,109 @@ services:
       retries: 5
 
   # =========================================
-  # 3. MinIO 对象存储服务
+  # 3. RustFS 对象存储服务（S3 兼容）
   # -----------------------------------------
   # 作用：
   #   - 存储非结构化数据：用户上传的简历(PDF/Word)、头像、知识库文档等
   #
-  # 教程知识点：
-  #   - MinIO 兼容 AWS S3 协议，这意味着代码中使用 S3 SDK 即可无缝切换到云厂商的对象存储。
-  #   - 端口说明：
-  #     - 9000: API 端口，代码通过此端口上传/下载文件
-  #     - 9001: 控制台端口，浏览器访问此端口管理文件
-  # =========================================
-  minio:
-    image: minio/minio
-    container_name: interview-minio
-    # 启动命令：指定数据目录和控制台地址
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
-    ports:
-      - "9000:9000"
-    volumes:
-      - minio_data:/data
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-
-  # =========================================
-  # 4. MinIO 初始化任务 (Init Container Pattern)
-  # -----------------------------------------
-  # 作用：
-  #   - 自动创建项目所需的存储桶 (Bucket)
-  #   - 设置存储桶的访问权限
+  # 为什么不再是 MinIO：
+  #   - MinIO 社区版自 2025-10 起停止发布免费 Docker 镜像，Docker Hub 上的
+  #     minio/minio、minio/mc 仓库已下线，继续引用只会得到
+  #     "pull access denied ... repository does not exist"，docker login 无法解决。
+  #   - 本项目开发依赖（docker-compose.dev.yml）已使用 RustFS，S3 API 兼容；
+  #     应用侧 S3Config 使用 forcePathStyle，无需改动代码。
   #
   # 教程知识点：
-  #   - "初始化容器"模式：这是一个短生命周期的容器，任务完成后自动退出。
-  #   - 解决了"谁来创建 Bucket"的问题，实现了基础设施的自动化配置，无需手动操作。
+  #   - 9000 是 S3 API 端口；Web 控制台 9001 在生产关闭，不对外暴露。
+  #   - RUSTFS_ACCESS_KEY / RUSTFS_SECRET_KEY 是对象存储根凭据，也是 app 的 S3 凭据；
+  #     .env 中必须提供，缺失时 compose 在插值阶段直接报错。
   # =========================================
-  createbuckets:
-    image: minio/mc
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: interview-rustfs
+    command: ["/data"]
+    environment:
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:?RUSTFS_ACCESS_KEY_is_required}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:?RUSTFS_SECRET_KEY_is_required}
+      # 生产不启动 Web 控制台，缩小攻击面；开发模式由 docker-compose.dev.yml 单独开启
+      RUSTFS_CONSOLE_ENABLE: "false"
+    networks:
+      default:
+        # 兼容存量部署中 APP_STORAGE_ENDPOINT=http://minio:9000 的写法；新配置请用 rustfs
+        aliases:
+          - minio
+    ports:
+      # 只绑定回环地址供本机排障；真正部署到公网时请删除这一行
+      - "127.0.0.1:9000:9000"
+    volumes:
+      - object_storage_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl --max-time 2 -s -o /dev/null -w '%{http_code}' http://localhost:9000/minio/health/live | grep -E '^(200|403)$'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  # =========================================
+  # 4. 对象存储初始化任务 (Init Container Pattern)
+  # -----------------------------------------
+  # 作用：
+  #   - 幂等创建 APP_STORAGE_BUCKET 指定的 Bucket，并确认匿名访问被拒绝
+  #
+  # 为什么不再用 minio/mc：
+  #   - minio/mc 镜像同样已下线；而生产 profile 明确禁止应用启动时自动建桶
+  #     （application-prod.yml: app.storage.auto-create-bucket=false）。
+  #   - RustFS 镜像自带 curl 8.x，支持 --aws-sigv4，可直接发签名 PUT /{bucket}
+  #     完成建桶，不需要再拉取任何第三方镜像。
+  # =========================================
+  storage-init:
+    image: rustfs/rustfs:latest
+    container_name: interview-storage-init
     depends_on:
-      minio:
-        condition: service_healthy # 必须等待 MinIO 服务健康（不仅仅是启动）
-    entrypoint: >
-      /bin/sh -c "
-      set -eu;
-      /usr/bin/mc alias set myminio http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" &&
-      (
-        /usr/bin/mc ls myminio/interview-guide > /dev/null 2>&1 ||
-        /usr/bin/mc mb myminio/interview-guide
-      ) &&
-      /usr/bin/mc anonymous set none myminio/interview-guide &&
-      /usr/bin/mc ls myminio/interview-guide
-      "
+      rustfs:
+        condition: service_healthy # 必须等待对象存储健康（不仅仅是启动）
+    environment:
+      S3_ENDPOINT: http://rustfs:9000
+      S3_REGION: ${APP_STORAGE_REGION:-us-east-1}
+      S3_BUCKET: ${APP_STORAGE_BUCKET:-interview-guide}
+      S3_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:?RUSTFS_ACCESS_KEY_is_required}
+      S3_SECRET_KEY: ${RUSTFS_SECRET_KEY:?RUSTFS_SECRET_KEY_is_required}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        sig="aws:amz:$${S3_REGION}:s3"
+        url="$${S3_ENDPOINT}/$${S3_BUCKET}"
+        cred="$${S3_ACCESS_KEY}:$${S3_SECRET_KEY}"
+
+        status=$$(curl -sS --connect-timeout 3 --max-time 15 -o /dev/null -w '%{http_code}' \
+          -I --aws-sigv4 "$${sig}" --user "$${cred}" "$${url}" || echo 000)
+        if [ "$${status}" = "403" ]; then
+          echo "[storage-init] credentials rejected by object storage" >&2
+          exit 1
+        fi
+        if [ "$${status}" = "200" ]; then
+          echo "[storage-init] bucket '$${S3_BUCKET}' already exists"
+        else
+          echo "[storage-init] creating bucket '$${S3_BUCKET}' (HEAD=$${status})"
+          curl -sS --fail-with-body --connect-timeout 3 --max-time 15 -X PUT \
+            --aws-sigv4 "$${sig}" --user "$${cred}" "$${url}" > /dev/null
+        fi
+
+        verify=$$(curl -sS --connect-timeout 3 --max-time 15 -o /dev/null -w '%{http_code}' \
+          -I --aws-sigv4 "$${sig}" --user "$${cred}" "$${url}" || echo 000)
+        if [ "$${verify}" != "200" ]; then
+          echo "[storage-init] bucket verification failed (HEAD=$${verify})" >&2
+          exit 1
+        fi
+        anon=$$(curl -sS --connect-timeout 3 --max-time 15 -o /dev/null -w '%{http_code}' \
+          -I "$${url}" || echo 000)
+        if [ "$${anon}" = "200" ]; then
+          echo "[storage-init] bucket is publicly readable; refusing to continue" >&2
+          exit 1
+        fi
+        echo "[storage-init] bucket '$${S3_BUCKET}' ready (anonymous HEAD=$${anon})"
 
   # =========================================
   # 5. 后端应用服务 (Spring Boot)
@@ -130,9 +176,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      minio:
+      rustfs:
         condition: service_healthy
-      createbuckets:
+      storage-init:
         condition: service_completed_successfully # 等待初始化任务完成
     environment:
       # === 运行环境 ===
@@ -153,17 +199,17 @@ services:
       REDIS_PORT: 6379
       
       # === 对象存储配置 ===
-      # 注意：后端在容器内访问 MinIO，使用 http://minio:9000
-      APP_STORAGE_ENDPOINT: http://minio:9000
-      APP_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}
-      APP_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
-      APP_STORAGE_BUCKET: interview-guide
-      APP_STORAGE_REGION: us-east-1
+      # 后端在容器内访问 RustFS（S3 兼容），使用服务名 rustfs 做 DNS
+      APP_STORAGE_ENDPOINT: http://rustfs:9000
+      APP_STORAGE_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:?RUSTFS_ACCESS_KEY_is_required}
+      APP_STORAGE_SECRET_KEY: ${RUSTFS_SECRET_KEY:?RUSTFS_SECRET_KEY_is_required}
+      APP_STORAGE_BUCKET: ${APP_STORAGE_BUCKET:-interview-guide}
+      APP_STORAGE_REGION: ${APP_STORAGE_REGION:-us-east-1}
       
       # === AI 模型配置 (必须配置) ===
       # 这里的变量值来自宿主机的环境变量或 .env 文件
-      AI_BAILIAN_API_KEY: ${AI_BAILIAN_API_KEY}
-      AI_MODEL: ${AI_MODEL:-qwen3.5-flash}
+      PROVIDER_DASHSCOPE_API_KEY: ${PROVIDER_DASHSCOPE_API_KEY}
+      PROVIDER_DASHSCOPE_MODEL: ${PROVIDER_DASHSCOPE_MODEL:-qwen3.5-flash}
       APP_AI_CONFIG_ENCRYPTION_KEY: ${APP_AI_CONFIG_ENCRYPTION_KEY}
 
       # === 用户认证与短信 ===
@@ -174,16 +220,25 @@ services:
       ALIYUN_SMS_ACCESS_KEY_SECRET: ${ALIYUN_SMS_ACCESS_KEY_SECRET:-}
       ALIYUN_SMS_SIGN_NAME: ${ALIYUN_SMS_SIGN_NAME:-}
       ALIYUN_SMS_LOGIN_CODE_TEMPLATE: ${ALIYUN_SMS_LOGIN_CODE_TEMPLATE:-}
-      ALIYUN_SMS_LOGIN_ALERT_TEMPLATE: ${ALIYUN_SMS_LOGIN_ALERT_TEMPLATE:-}
+      # PNVS（号码认证）凭据：.env 里 APP_AUTH_SMS_PROVIDER=pnvs 时必须传入，
+      # 否则 AuthBootstrapValidator 判定"PNVS 短信认证配置不完整"并拒绝启动。
+      # 注意 .env 不会自动注入容器，每一行都必须在这里显式声明。
+      ALIYUN_PNVS_ACCESS_KEY_ID: ${ALIYUN_PNVS_ACCESS_KEY_ID:-}
+      ALIYUN_PNVS_ACCESS_KEY_SECRET: ${ALIYUN_PNVS_ACCESS_KEY_SECRET:-}
+      ALIYUN_PNVS_SIGN_NAME: ${ALIYUN_PNVS_SIGN_NAME:-}
+      ALIYUN_PNVS_TEMPLATE_CODE: ${ALIYUN_PNVS_TEMPLATE_CODE:-}
+      ALIYUN_PNVS_SCHEME_NAME: ${ALIYUN_PNVS_SCHEME_NAME:-}
 
       # === 面试参数配置 ===
       APP_INTERVIEW_FOLLOW_UP_COUNT: ${APP_INTERVIEW_FOLLOW_UP_COUNT:-1}
       APP_INTERVIEW_EVALUATION_BATCH_SIZE: ${APP_INTERVIEW_EVALUATION_BATCH_SIZE:-8}
 
       # === 生产 Profile 可调项（详见 application-prod.yml）===
-      # 首次部署空库：临时 JPA_DDL_AUTO=update、PGVECTOR_INIT_SCHEMA=true 建表，之后改回 validate / false
+      # 业务表由 Flyway 迁移脚本管理，JPA 只做校验。
+      # 空库首次部署时 vector_store 表由 Spring AI 以 CREATE IF NOT EXISTS 方式补齐；
+      # 建表完成后可显式设置 PGVECTOR_INIT_SCHEMA=false。此处默认值需与 application-prod.yml 一致。
       JPA_DDL_AUTO: ${JPA_DDL_AUTO:-validate}
-      PGVECTOR_INIT_SCHEMA: ${PGVECTOR_INIT_SCHEMA:-false}
+      PGVECTOR_INIT_SCHEMA: ${PGVECTOR_INIT_SCHEMA:-true}
       # CORS 白名单：生产请改成真实访问域名，多个用英文逗号分隔
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?CORS_ALLOWED_ORIGINS is required}
       # 文件日志路径（容器内，挂载 app_logs 卷持久化）
@@ -218,5 +273,6 @@ services:
 volumes:
   postgres_data:
   redis_data:
-  minio_data:
+  # 生产与开发（docker-compose.dev.yml 的 rustfs_data）使用不同卷，避免互相污染
+  object_storage_data:
   app_logs:

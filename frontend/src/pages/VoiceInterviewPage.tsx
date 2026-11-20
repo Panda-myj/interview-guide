@@ -62,9 +62,14 @@ export default function VoiceInterviewPage() {
   const [skills, setSkills] = useState<SkillDTO[]>([]);
 
   // Refs
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wsRef = useRef<VoiceInterviewWebSocket | null>(null);
-  const pauseTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const pauseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const connectDelayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 连接阶段总看门狗：覆盖 创建会话 -> 换票 -> WS 握手 全过程。
+  // 任何一步挂起都能把 UI 从 connecting 拉回，并给出可操作的错误提示。
+  const connectWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const CONNECT_PHASE_TIMEOUT_MS = 20000;
   const autoStartRef = useRef(false);
   const endedByUserRef = useRef(false);
   const isAiSpeakingRef = useRef(false);
@@ -82,9 +87,12 @@ export default function VoiceInterviewPage() {
   const browserSpeechWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Ref to track latest aiText for async callbacks (avoids stale closure)
   const aiTextRef = useRef('');
+  // 卸载清理只能跑一次，因此用 ref 读取「最新会话 ID」，不把 sessionId 放进清理副作用依赖
+  const sessionIdRef = useRef<number | null>(null);
   useEffect(() => { aiTextRef.current = aiText; }, [aiText]);
   useEffect(() => { isAsrReadyRef.current = isAsrReady; }, [isAsrReady]);
   useEffect(() => { isSubmittingRef.current = isSubmitting; }, [isSubmitting]);
+  useEffect(() => { sessionIdRef.current = sessionId; }, [sessionId]);
 
   const setAiSpeaking = useCallback((value: boolean) => {
     isAiSpeakingRef.current = value;
@@ -335,10 +343,31 @@ export default function VoiceInterviewPage() {
   }, [skills, effectiveSkillId]);
 
   // Cleanup on unmount — 自动暂停未结束的 session
+  //
+  // 依赖必须是空数组：会话 ID 是通过 sessionIdRef 读取的。
+  // 之前把 sessionId 放进依赖里，创建会话（setSessionId）会立刻触发一次清理，
+  // 把 handlePhaseConfig 刚排好的 WS 连接定时器（connectDelayRef）与连接看门狗
+  // （connectWatchdogRef）一起清掉 —— 结果既不会去换票连 WS，也不会超时报错，
+  // 页面永久停在「连接中」；后端因为没有连接和消息，会在宽限期后把会话按孤儿回收，
+  // 生成一份「无有效对话」的空评估。
   useEffect(() => {
     return () => {
       if (timerRef.current) {
         clearInterval(timerRef.current);
+      }
+      // 长暂停定时器与 WS 重连延迟定时器必须在卸载时取消，
+      // 否则会在已卸载组件上触发 setState / navigate
+      if (pauseTimeoutRef.current) {
+        clearTimeout(pauseTimeoutRef.current);
+        pauseTimeoutRef.current = null;
+      }
+      if (connectDelayRef.current) {
+        clearTimeout(connectDelayRef.current);
+        connectDelayRef.current = null;
+      }
+      if (connectWatchdogRef.current) {
+        clearTimeout(connectWatchdogRef.current);
+        connectWatchdogRef.current = null;
       }
       if (wsRef.current) {
         wsRef.current.disconnect();
@@ -352,12 +381,13 @@ export default function VoiceInterviewPage() {
       }
       clearPendingAiTextCommit();
       // 用户没有主动结束/暂停时，自动暂停 session
-      const currentSessionId = sessionId;
+      const currentSessionId = sessionIdRef.current;
       if (currentSessionId && !endedByUserRef.current) {
         voiceInterviewApi.pauseSession(currentSessionId).catch(() => {});
       }
     };
-  }, [clearPendingAiTextCommit, sessionId, stopBrowserSpeech]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Start interview timer
   useEffect(() => {
@@ -405,8 +435,33 @@ export default function VoiceInterviewPage() {
     wsRef.current.sendControl('submit', { text });
   }, [userText, isSubmitting]);
 
+  const clearConnectWatchdog = useCallback(() => {
+    if (connectWatchdogRef.current) {
+      clearTimeout(connectWatchdogRef.current);
+      connectWatchdogRef.current = null;
+    }
+  }, []);
+
+  // 进入 connecting 时启动；onOpen 清掉；超时仍未连上则明确报错并脱离 connecting，
+  // 避免“正在连接服务器...”永久停留（覆盖创建会话/换票/握手任一环节挂起）。
+  const armConnectWatchdog = useCallback(() => {
+    clearConnectWatchdog();
+    connectWatchdogRef.current = setTimeout(() => {
+      connectWatchdogRef.current = null;
+      setConnectionStatus(prev => {
+        if (prev === 'connected') {
+          return prev;
+        }
+        setError('连接服务器超时，请检查后端服务与网络后重试');
+        setIsAsrReady(false);
+        return 'disconnected';
+      });
+    }, CONNECT_PHASE_TIMEOUT_MS);
+  }, [clearConnectWatchdog]);
+
   const createWebSocketHandlers = useCallback(() => ({
     onOpen: () => {
+      clearConnectWatchdog();
       setConnectionStatus('connected');
       setIsAsrReady(false);
     },
@@ -481,6 +536,7 @@ export default function VoiceInterviewPage() {
       }, 15000);
     },
     onClose: (event: { code: number }) => {
+      clearConnectWatchdog();
       setConnectionStatus('disconnected');
       setIsAsrReady(false);
       clearPendingAiTextCommit();
@@ -490,6 +546,7 @@ export default function VoiceInterviewPage() {
       }
     },
     onError: () => {
+      clearConnectWatchdog();
       clearPendingAiTextCommit();
       stopBrowserSpeech();
       setError('WebSocket 连接错误，请检查网络后重试');
@@ -524,6 +581,16 @@ export default function VoiceInterviewPage() {
         setIsAsrReady(false);
         setConnectionStatus('disconnected');
         setError(message?.trim() || '该会话已在其他窗口打开，请关闭其它页面后刷新重试');
+        return;
+      }
+      if (action === 'session_ended') {
+        // 会话已收尾（主动结束 / 超时对账）：服务端不再接受对话，停止重连并给出明确提示，
+        // 否则页面会停在「连接中/连接断开」且用户不知道面试已经结束。
+        setIsAsrReady(false);
+        setIsRecording(false);
+        setConnectionStatus('disconnected');
+        setError(message?.trim() || '本次面试已结束，可在面试记录中查看评估结果');
+        wsRef.current?.disconnect();
         return;
       }
       if (action === 'tts_unavailable') {
@@ -567,11 +634,17 @@ export default function VoiceInterviewPage() {
     setAiSpeaking,
     speakWithBrowser,
     stopBrowserSpeech,
+    clearConnectWatchdog,
   ]);
 
   const connectWithHandlers = useCallback((sessionId: number, wsUrl: string) => {
     setIsAsrReady(false);
-    setTimeout(() => {
+    // 延迟连接前先取消上一次未触发的定时器，卸载时也会被统一清理
+    if (connectDelayRef.current) {
+      clearTimeout(connectDelayRef.current);
+    }
+    connectDelayRef.current = setTimeout(() => {
+      connectDelayRef.current = null;
       try {
         wsRef.current = connectWebSocket(sessionId, wsUrl, createWebSocketHandlers());
       } catch (error) {
@@ -595,6 +668,7 @@ export default function VoiceInterviewPage() {
     setError(null);
     setConnectionStatus('connecting');
     setIsAsrReady(false);
+    armConnectWatchdog();
 
     try {
       const session = await voiceInterviewApi.createSession({
@@ -615,18 +689,20 @@ export default function VoiceInterviewPage() {
       const wsUrl = resolveVoiceInterviewWebSocketUrl(session.sessionId, session.webSocketUrl);
       connectWithHandlers(session.sessionId, wsUrl);
     } catch (error) {
+      clearConnectWatchdog();
       const errorMessage = error instanceof Error ? error.message : '创建面试会话失败，请重试';
       setError(errorMessage);
       setConnectionStatus('disconnected');
       setIsAsrReady(false);
       toast.error('创建会话失败：' + errorMessage);
     }
-  }, [connectWithHandlers]);
+  }, [connectWithHandlers, armConnectWatchdog, clearConnectWatchdog]);
 
   const handleResumeSession = useCallback(async (id: number) => {
     setError(null);
     setConnectionStatus('connecting');
     setIsAsrReady(false);
+    armConnectWatchdog();
 
     try {
       const [session, history] = await Promise.all([
@@ -676,11 +752,12 @@ export default function VoiceInterviewPage() {
       const wsUrl = resolveVoiceInterviewWebSocketUrl(session.sessionId, session.webSocketUrl);
       connectWithHandlers(session.sessionId, wsUrl);
     } catch (error) {
+      clearConnectWatchdog();
       setError(error instanceof Error ? error.message : '恢复会话失败');
       setConnectionStatus('disconnected');
       setIsAsrReady(false);
     }
-  }, [connectWithHandlers]);
+  }, [connectWithHandlers, armConnectWatchdog, clearConnectWatchdog]);
 
   // Auto-start: 新建 or 恢复
   useEffect(() => {

@@ -180,16 +180,37 @@ public final class RagContextBuilder {
     return builder.toString();
   }
 
-  private String truncate(String text, int maxChars) {
-    if (text == null) {
+  private static String truncate(String text, int maxChars) {
+    if (text == null || maxChars <= 0) {
       return "";
     }
     if (text.length() <= maxChars) {
       return text;
     }
     String suffix = "…(内容已截断)";
-    int keep = Math.max(0, maxChars - suffix.length());
-    return text.substring(0, keep) + suffix;
+    int keep = maxChars - suffix.length();
+    if (keep <= 0) {
+      // 预算连后缀都放不下时，只返回后缀的前 maxChars 个字符，不能反向突破上限。
+      return truncateByCodePoints(suffix, maxChars);
+    }
+    return truncateByCodePoints(text, keep) + suffix;
+  }
+
+  /** 按 UTF-16 长度截断，但不把 emoji 等代理对切成半个字符。 */
+  private static String truncateByCodePoints(String text, int maxChars) {
+    if (maxChars <= 0) {
+      return "";
+    }
+    if (text.length() <= maxChars) {
+      return text;
+    }
+    int end = maxChars;
+    if (end > 0 && end < text.length()
+        && Character.isHighSurrogate(text.charAt(end - 1))
+        && Character.isLowSurrogate(text.charAt(end))) {
+      end--;
+    }
+    return text.substring(0, end);
   }
 
   public String describeLimits() {

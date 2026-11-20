@@ -78,17 +78,21 @@ public class FileValidationService {
     
     /**
      * 检查文件类型是否在允许列表中
+     *
+     * <p>匹配规则：contentType 完全等于允许项，或包含允许项（支持部分匹配，
+     * 如 "pdf" 会匹配 "application/pdf"）。不做反向包含（allowed.contains(contentType)），
+     * 否则过短的 contentType（如 "app"）会被任意允许项误匹配，形成校验绕过。</p>
      */
     private boolean isAllowedType(String contentType, List<String> allowedTypes) {
         if (contentType == null || allowedTypes == null || allowedTypes.isEmpty()) {
             return false;
         }
-        
+
         String lowerContentType = contentType.toLowerCase();
         return allowedTypes.stream()
             .anyMatch(allowed -> {
                 String lowerAllowed = allowed.toLowerCase();
-                return lowerContentType.contains(lowerAllowed) || lowerAllowed.contains(lowerContentType);
+                return lowerContentType.equals(lowerAllowed) || lowerContentType.contains(lowerAllowed);
             });
     }
     

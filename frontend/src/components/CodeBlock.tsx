@@ -1,4 +1,4 @@
-import { useState, lazy, Suspense } from 'react';
+import { useState, lazy, Suspense, useRef, useEffect } from 'react';
 import oneDark from 'react-syntax-highlighter/dist/esm/styles/prism/one-dark';
 import { Check, Copy } from 'lucide-react';
 import type { SyntaxHighlighterProps } from 'react-syntax-highlighter';
@@ -53,12 +53,27 @@ interface CodeBlockProps {
 
 export default function CodeBlock({ language, children }: CodeBlockProps) {
   const [copied, setCopied] = useState(false);
+  const copyTimerRef = useRef<number | null>(null);
+
+  // 流式回答会频繁重建/卸载代码块，卸载时必须清掉定时器，避免对已卸载组件 setState。
+  useEffect(() => () => {
+    if (copyTimerRef.current !== null) {
+      window.clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = null;
+    }
+  }, []);
 
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(children);
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+      copyTimerRef.current = window.setTimeout(() => {
+        setCopied(false);
+        copyTimerRef.current = null;
+      }, 2000);
     } catch (err) {
       console.error('复制失败:', err);
     }

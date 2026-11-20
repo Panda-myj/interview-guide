@@ -54,7 +54,8 @@ public class ResumeController {
     @RateLimit(dimension = RateLimit.Dimension.IP, count = 5)
     public Result<Map<String, Object>> uploadAndAnalyze(@RequestParam("file") MultipartFile file) {
         Map<String, Object> result = uploadService.uploadAndAnalyze(file);
-        boolean isDuplicate = (Boolean) result.get("duplicate");
+        // 防御性取值：key 缺失时视为非重复，避免自动拆箱 NPE
+        boolean isDuplicate = Boolean.TRUE.equals(result.get("duplicate"));
         if (isDuplicate) {
             return Result.success("检测到相同简历，已返回历史分析结果", result);
         }
@@ -91,7 +92,8 @@ public class ResumeController {
     public ResponseEntity<byte[]> exportAnalysisPdf(@PathVariable Long id) {
         try {
             var result = historyService.exportAnalysisPdf(id);
-            String filename = URLEncoder.encode(result.filename(), StandardCharsets.UTF_8);
+            String filename = URLEncoder.encode(result.filename(), StandardCharsets.UTF_8)
+                .replace("+", "%20");
 
             return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename*=UTF-8''" + filename)

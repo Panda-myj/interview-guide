@@ -1,6 +1,8 @@
 package interview.guide.modules.interview;
 
 import interview.guide.common.annotation.RateLimit;
+import interview.guide.common.exception.BusinessException;
+import interview.guide.common.exception.ErrorCode;
 import interview.guide.common.result.Result;
 import interview.guide.modules.interview.model.CreateInterviewRequest;
 import interview.guide.modules.interview.model.InterviewDetailDTO;
@@ -13,6 +15,7 @@ import interview.guide.modules.interview.service.InterviewHistoryService;
 import interview.guide.modules.interview.service.InterviewPersistenceService;
 import interview.guide.modules.interview.service.InterviewSessionService;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.PageRequest;
@@ -76,7 +79,7 @@ public class InterviewController {
     @PostMapping("/api/interview/sessions")
     @RateLimit(dimension = RateLimit.Dimension.GLOBAL, count = 5)
     @RateLimit(dimension = RateLimit.Dimension.IP, count = 5)
-    public Result<InterviewSessionDTO> createSession(@RequestBody CreateInterviewRequest request) {
+    public Result<InterviewSessionDTO> createSession(@Valid @RequestBody CreateInterviewRequest request) {
         log.info("创建面试会话，题目数量: {}", request.questionCount());
         InterviewSessionDTO session = sessionService.createSession(request);
         return Result.success(session);
@@ -107,10 +110,8 @@ public class InterviewController {
     public Result<SubmitAnswerResponse> submitAnswer(
             @PathVariable String sessionId,
             @RequestBody Map<String, Object> body) {
-        Integer questionIndex = (Integer) body.get("questionIndex");
-        String answer = (String) body.get("answer");
-        log.info("提交答案: 会话{}, 问题{}", sessionId, questionIndex);
-        SubmitAnswerRequest request = new SubmitAnswerRequest(sessionId, questionIndex, answer);
+        SubmitAnswerRequest request = toSubmitAnswerRequest(sessionId, body);
+        log.info("提交答案: 会话{}, 问题{}", sessionId, request.questionIndex());
         SubmitAnswerResponse response = sessionService.submitAnswer(request);
         return Result.success(response);
     }
@@ -141,12 +142,34 @@ public class InterviewController {
     public Result<Void> saveAnswer(
             @PathVariable String sessionId,
             @RequestBody Map<String, Object> body) {
-        Integer questionIndex = (Integer) body.get("questionIndex");
-        String answer = (String) body.get("answer");
-        log.info("暂存答案: 会话{}, 问题{}", sessionId, questionIndex);
-        SubmitAnswerRequest request = new SubmitAnswerRequest(sessionId, questionIndex, answer);
+        SubmitAnswerRequest request = toSubmitAnswerRequest(sessionId, body);
+        log.info("暂存答案: 会话{}, 问题{}", sessionId, request.questionIndex());
         sessionService.saveAnswer(request);
         return Result.success(null);
+    }
+
+    /**
+     * 保持原有 Map 请求体契约（sessionId 来自路径，不由客户端提交），
+     * 同时避免强转导致的 ClassCastException 与 null 拆箱 NPE。
+     */
+    private SubmitAnswerRequest toSubmitAnswerRequest(
+            String sessionId, Map<String, Object> body) {
+        Object indexValue = body == null ? null : body.get("questionIndex");
+        Object answerValue = body == null ? null : body.get("answer");
+        Integer questionIndex = null;
+        if (indexValue instanceof Number number) {
+            long index = number.longValue();
+            if (number.doubleValue() == index && index >= 0 && index <= Integer.MAX_VALUE) {
+                questionIndex = (int) index;
+            }
+        }
+        if (questionIndex == null) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "问题索引无效");
+        }
+        if (!(answerValue instanceof String answer) || answer.isBlank()) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "答案不能为空");
+        }
+        return new SubmitAnswerRequest(sessionId, questionIndex, answer);
     }
     
     /**

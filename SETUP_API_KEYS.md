@@ -9,9 +9,9 @@
 **用途**:
 - **LLM 对话**: 生成面试问题、评估回答
 - **ASR 语音识别**: 将用户语音实时转换为文本（qwen3-asr-flash-realtime）
-- **TTS 语音合成**: 将 AI 回答实时转换为语音（qwen3-tts-flash-realtime）
+- **TTS 语音合成**: 将 AI 回答转换为语音（qwen3-tts-flash，官方 HTTP 端点）
 
-**统一 API Key**: 一个密钥即可使用所有功能，无需分别申请！
+**统一 API Key**: 一个密钥即可使用所有功能，无需分别申请！变量名统一为 `PROVIDER_DASHSCOPE_API_KEY`。
 
 **获取步骤**:
 1. 访问 [阿里云百炼平台](https://bailian.console.aliyun.com/)
@@ -22,7 +22,7 @@
 
 **配置变量**:
 ```bash
-AI_BAILIAN_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxx
+PROVIDER_DASHSCOPE_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
 **费用**:
@@ -45,10 +45,10 @@ cp .env.example .env
 2. 编辑 `.env` 文件，填入您的实际密钥：
 ```bash
 # 使用您自己的密钥替换以下占位符
-AI_BAILIAN_API_KEY=sk-your-actual-key-here
+PROVIDER_DASHSCOPE_API_KEY=sk-your-actual-key-here
 
 # 可选：选择不同的 LLM 模型
-AI_MODEL=qwen3.5-flash  # 默认值，也可改为 qwen3.5-plus、qwen-max 等
+PROVIDER_DASHSCOPE_MODEL=qwen3.5-flash  # 默认值，也可改为 qwen3.5-plus、qwen3.5-122b-a10b 等当前工作空间已开通的模型
 ```
 
 3. 启动应用时会自动读取 `.env` 文件
@@ -57,12 +57,12 @@ AI_MODEL=qwen3.5-flash  # 默认值，也可改为 qwen3.5-plus、qwen-max 等
 
 ```bash
 # Linux/Mac
-export AI_BAILIAN_API_KEY=sk-your-key
-export AI_MODEL=qwen3.5-flash  # 可选
+export PROVIDER_DASHSCOPE_API_KEY=sk-your-key
+export PROVIDER_DASHSCOPE_MODEL=qwen3.5-flash  # 可选
 
 # Windows PowerShell
-$env:AI_BAILIAN_API_KEY="sk-your-key"
-$env:AI_MODEL="qwen3.5-flash"  # 可选
+$env:PROVIDER_DASHSCOPE_API_KEY="sk-your-key"
+$env:PROVIDER_DASHSCOPE_MODEL="qwen3.5-flash"  # 可选
 ```
 
 ### 方式 3: 在 IDE 中配置
@@ -85,7 +85,7 @@ $env:AI_MODEL="qwen3.5-flash"  # 可选
 ```
 ✅ 成功日志示例:
 QwenAsrService initialized with model: qwen3-asr-flash-realtime
-QwenTtsService initialized with model: qwen3-tts-flash-realtime, voice: Cherry
+QwenTtsService initialized with HTTP model: qwen3-tts-flash, voice: Cherry, sampleRate: 24000Hz
 DashScope LLM service initialized
 
 ❌ 失败日志示例:
@@ -100,8 +100,8 @@ WebSocket failed: Expected HTTP 101 response but was '401 Unauthorized'
 1. **使用免费额度**: 新用户都有免费试用额度
 2. **限制并发**: 配置 `rate-limit` 参数控制并发数
 3. **选择合适模型**:
-   - 开发测试用 `qwen-turbo`（更便宜）
-- 生产环境优先按场景选择；当前默认使用 `qwen3.5-flash`
+   - 默认 `qwen3.5-flash`；旧文档推荐的 `qwen-turbo` 在部分工作空间已下线（404 Model not exist），请勿直接照抄
+   - 生产环境优先按场景选择，并确认模型在当前业务空间已开通
 4. **控制面试时长**: 通过 `plannedDuration` 参数限制面试时长
 
 ---
@@ -110,11 +110,11 @@ WebSocket failed: Expected HTTP 101 response but was '401 Unauthorized'
 
 **Q: 必须使用阿里云吗？**
 
-A: 目前 LLM 支持多家提供商（DashScope/MiniMax/OpenAI/DeepSeek），但语音服务使用的是 Qwen3 实时语音模型，需要阿里云 DashScope API Key。
+A: 目前 LLM 支持多家提供商（DashScope / Kimi / DeepSeek / GLM / LM Studio），但语音服务使用 Qwen3 模型，需要阿里云 DashScope API Key。
 
 **Q: 如何降低成本？**
 
-A: 1) 使用 `qwen-turbo` 模型；2) 限制面试时长；3) 添加用户配额限制
+A: 1) 使用 `qwen3.5-flash` 等当前默认模型；2) 限制面试时长；3) 添加用户配额限制
 
 **Q: API 密钥会泄露吗？**
 
@@ -126,7 +126,7 @@ A: 阿里云新用户有免费额度，足够测试使用。正式上线后再�
 
 **Q: 一个 API Key 真的够用吗？**
 
-A: 是的！项目已升级到 Qwen3 实时语音模型，LLM、ASR、TTS 共用一个 DashScope API Key，无需分别申请。
+A: 是的！LLM、实时 ASR、HTTP TTS 共用一个 DashScope API Key，无需分别申请。
 
 ---
 

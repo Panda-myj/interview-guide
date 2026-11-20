@@ -80,10 +80,12 @@ public class PromptSanitizer {
         }
         var delimMatcher = DELIMITER_INJECTION_PATTERN.matcher(result);
         if (delimMatcher.find()) {
+            injected = true;
             result = delimMatcher.replaceAll("[filtered-delimiter]");
         }
         var tagMatcher = BOUNDARY_TAG_PATTERN.matcher(result);
         if (tagMatcher.find()) {
+            injected = true;
             result = tagMatcher.replaceAll("[filtered-boundary-tag]");
         }
 

@@ -6,10 +6,10 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import interview.guide.common.ai.LlmProviderRegistry;
 import interview.guide.common.ai.StructuredOutputInvoker;
 import interview.guide.common.exception.BusinessException;
 import interview.guide.common.exception.ErrorCode;
+import interview.guide.modules.llmprovider.service.UserLlmConfigService;
 import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -28,7 +28,7 @@ import org.springframework.core.io.ResourceLoader;
 class ResumeGradingServiceFailureTest {
 
   @Mock
-  private LlmProviderRegistry llmProviderRegistry;
+  private UserLlmConfigService userLlmConfigService;
 
   @Mock
   private StructuredOutputInvoker structuredOutputInvoker;
@@ -49,16 +49,16 @@ class ResumeGradingServiceFailureTest {
     when(properties.getUserPromptPath()).thenReturn("user.st");
     when(resourceLoader.getResource(anyString())).thenReturn(resource);
     service = new ResumeGradingService(
-        llmProviderRegistry, structuredOutputInvoker, properties, resourceLoader);
+        userLlmConfigService, structuredOutputInvoker, properties, resourceLoader);
   }
 
   @Test
   @DisplayName("AI 调用失败抛出业务异常且不泄露内部错误细节")
   void throwsBusinessExceptionInsteadOfFakeResult() {
-    when(llmProviderRegistry.getDefaultChatClient())
+    when(userLlmConfigService.requireChatClientForUser(1L))
         .thenThrow(new IllegalStateException("provider secret-key=abc123 unavailable"));
 
-    assertThatThrownBy(() -> service.analyzeResume("简历文本"))
+    assertThatThrownBy(() -> service.analyzeResume(1L, "简历文本"))
         .isInstanceOf(BusinessException.class)
         .satisfies(error -> {
           BusinessException businessException = (BusinessException) error;

@@ -5,6 +5,7 @@ import interview.guide.modules.auth.security.AuthCookieService;
 import interview.guide.modules.auth.service.AuthSupport;
 import interview.guide.modules.voiceinterview.repository.VoiceInterviewSessionRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.server.ServerHttpRequest;
 import org.springframework.http.server.ServerHttpResponse;
@@ -14,6 +15,7 @@ import org.springframework.web.socket.server.HandshakeInterceptor;
 
 import java.util.Map;
 
+@Slf4j
 @Component
 @RequiredArgsConstructor
 public class VoiceInterviewHandshakeInterceptor implements HandshakeInterceptor {
@@ -33,20 +35,33 @@ public class VoiceInterviewHandshakeInterceptor implements HandshakeInterceptor 
         String path = request.getURI().getPath();
         String sessionId = path.substring(path.lastIndexOf('/') + 1);
         if (ticket == null || ticket.isBlank()) {
+            log.warn("WS handshake rejected: no ws_ticket cookie, origin={}, path={}",
+                request.getHeaders().getFirst("Origin"), path);
             response.setStatusCode(HttpStatus.UNAUTHORIZED);
             return false;
         }
 
         String ticketKey = "auth:ws-ticket:" + authSupport.sha256(ticket);
-        Object value = redisService.get(ticketKey);
+        Object value;
+        try {
+            value = redisService.get(ticketKey);
+        } catch (Exception e) {
+            // Redis 编码/连接失败不能让握手静默挂起，必须明确拒绝并记录原因
+            log.error("WS handshake failed reading ticket from Redis: {}", e.getMessage(), e);
+            response.setStatusCode(HttpStatus.UNAUTHORIZED);
+            return false;
+        }
         redisService.delete(ticketKey);
         if (value == null) {
+            log.warn("WS handshake rejected: ticket missing/expired or read with wrong codec, sessionId={}", sessionId);
             response.setStatusCode(HttpStatus.UNAUTHORIZED);
             return false;
         }
 
         String[] parts = value.toString().split(":", 2);
         if (parts.length != 2 || !parts[1].equals(sessionId)) {
+            log.warn("WS handshake rejected: ticket session mismatch, expected={}, actual={}", sessionId,
+                parts.length == 2 ? parts[1] : "invalid");
             response.setStatusCode(HttpStatus.UNAUTHORIZED);
             return false;
         }
@@ -62,10 +77,12 @@ public class VoiceInterviewHandshakeInterceptor implements HandshakeInterceptor 
         }
 
         if (sessionRepository.findByIdAndOwnerUserId(voiceSessionId, userId).isEmpty()) {
+            log.warn("WS handshake rejected: session {} not owned by user {}", voiceSessionId, userId);
             response.setStatusCode(HttpStatus.FORBIDDEN);
             return false;
         }
 
+        log.info("WS handshake accepted: sessionId={}, userId={}", sessionId, userId);
         attributes.put("userId", userId);
         attributes.put("sessionId", sessionId);
         return true;

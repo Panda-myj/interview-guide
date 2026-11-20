@@ -68,9 +68,10 @@ class TtsConnectivityProbeTest {
 
     String apiKey = resolveApiKey();
     Assumptions.assumeTrue(apiKey != null && !apiKey.isBlank(),
-        "跳过探针：未找到 AI_BAILIAN_API_KEY（环境变量或 .env）");
+        "跳过探针：未找到 PROVIDER_DASHSCOPE_API_KEY（环境变量或 .env）");
 
-    String baseUrl = System.getenv().getOrDefault("APP_VOICE_TTS_URL", DEFAULT_URL);
+    // 旧版实时协议探针专用端点，与生产 HTTP TTS 的固定端点无关；未设置时用 DEFAULT_URL。
+    String baseUrl = System.getenv().getOrDefault("TTS_PROBE_WS_URL", DEFAULT_URL);
     URI uri = URI.create(baseUrl + "?model=" + MODEL);
     String workspaceId = System.getenv("DASHSCOPE_WORKSPACE_ID");
 
@@ -278,11 +279,11 @@ class TtsConnectivityProbeTest {
   }
 
   /**
-   * 依次从环境变量、仓库各层 .env 中寻找 AI_BAILIAN_API_KEY
+   * 依次从环境变量、仓库各层 .env 中寻找 PROVIDER_DASHSCOPE_API_KEY
    * （build.gradle 只在 bootRun 任务注入 .env，跑测试时不会自动加载）。
    */
   private static String resolveApiKey() {
-    String fromEnv = System.getenv("AI_BAILIAN_API_KEY");
+    String fromEnv = System.getenv("PROVIDER_DASHSCOPE_API_KEY");
     if (fromEnv != null && !fromEnv.isBlank()) {
       return fromEnv.trim();
     }
@@ -304,8 +305,8 @@ class TtsConnectivityProbeTest {
     try {
       for (String line : Files.readAllLines(envFile, StandardCharsets.UTF_8)) {
         String trimmed = line.trim();
-        if (trimmed.startsWith("AI_BAILIAN_API_KEY=")) {
-          String value = trimmed.substring("AI_BAILIAN_API_KEY=".length()).trim();
+        if (trimmed.startsWith("PROVIDER_DASHSCOPE_API_KEY=")) {
+          String value = trimmed.substring("PROVIDER_DASHSCOPE_API_KEY=".length()).trim();
           return value.isEmpty() ? null : value;
         }
       }

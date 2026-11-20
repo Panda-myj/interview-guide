@@ -283,9 +283,9 @@ export default function InterviewHistoryPage({ onBack: _onBack, onViewInterview,
   }, [loadAll]);
 
   // Polling for evaluation status
+  // 只依赖「是否存在评估中记录」这个布尔值，避免 items 每次刷新都重建定时器把 3s 轮询拉长。
+  const hasEvaluating = items.some(i => isEvaluating(i));
   useEffect(() => {
-    const hasEvaluating = items.some(i => isEvaluating(i));
-
     if (hasEvaluating && !pollingRef.current) {
       pollingRef.current = window.setInterval(() => loadAll(true), 3000);
     } else if (!hasEvaluating && pollingRef.current) {
@@ -299,7 +299,7 @@ export default function InterviewHistoryPage({ onBack: _onBack, onViewInterview,
         pollingRef.current = null;
       }
     };
-  }, [items, loadAll]);
+  }, [hasEvaluating, loadAll]);
 
   const handleRowClick = (item: UnifiedInterviewItem) => {
     if (item.type === 'text') {

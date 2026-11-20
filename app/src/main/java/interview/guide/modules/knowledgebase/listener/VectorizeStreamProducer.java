@@ -2,6 +2,7 @@ package interview.guide.modules.knowledgebase.listener;
 
 import interview.guide.common.async.AbstractStreamProducer;
 import interview.guide.common.constant.AsyncTaskStreamConstants;
+import interview.guide.common.transaction.TransactionalExecutor;
 import interview.guide.infrastructure.redis.RedisService;
 import interview.guide.modules.knowledgebase.model.VectorStatus;
 import interview.guide.modules.knowledgebase.repository.KnowledgeBaseRepository;
@@ -19,12 +20,15 @@ import java.util.Map;
 public class VectorizeStreamProducer extends AbstractStreamProducer<VectorizeStreamProducer.VectorizeTaskPayload> {
 
     private final KnowledgeBaseRepository knowledgeBaseRepository;
+    private final TransactionalExecutor transactionalExecutor;
 
     record VectorizeTaskPayload(Long kbId, String content) {}
 
-    public VectorizeStreamProducer(RedisService redisService, KnowledgeBaseRepository knowledgeBaseRepository) {
+    public VectorizeStreamProducer(RedisService redisService, KnowledgeBaseRepository knowledgeBaseRepository,
+                                   TransactionalExecutor transactionalExecutor) {
         super(redisService);
         this.knowledgeBaseRepository = knowledgeBaseRepository;
+        this.transactionalExecutor = transactionalExecutor;
     }
 
     /**
@@ -63,7 +67,10 @@ public class VectorizeStreamProducer extends AbstractStreamProducer<VectorizeStr
 
     @Override
     protected void onSendFailed(VectorizeTaskPayload payload, String error) {
-        updateVectorStatus(payload.kbId(), VectorStatus.FAILED, truncateError(error));
+        // 与 AnalyzeStreamProducer / VoiceEvaluateStreamProducer 对齐：
+        // 外层可能处于事务中，失败状态更新必须在独立事务内落库，避免随外层回滚丢失
+        transactionalExecutor.runRequiresNew(
+            () -> updateVectorStatus(payload.kbId(), VectorStatus.FAILED, truncateError(error)));
     }
 
     /**
@@ -73,7 +80,7 @@ public class VectorizeStreamProducer extends AbstractStreamProducer<VectorizeStr
         knowledgeBaseRepository.findById(kbId).ifPresent(kb -> {
             kb.setVectorStatus(status);
             if (error != null) {
-                kb.setVectorError(error.length() > 500 ? error.substring(0, 500) : error);
+                kb.setVectorError(error);
             }
             knowledgeBaseRepository.save(kb);
         });

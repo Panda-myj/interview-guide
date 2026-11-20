@@ -134,9 +134,6 @@ app:
         min-questions: 2
         max-questions: 5
 
-    tts:
-      default-voice: siyue
-
     qwen:
       asr:
         url: wss://dashscope.aliyuncs.com/api-ws/v1/realtime
@@ -148,30 +145,18 @@ app:
         enable-turn-detection: true
         turn-detection-type: server_vad
         turn-detection-threshold: 0.0
-        turn-detection-silence-duration-ms: 1000
+        turn-detection-silence-duration-ms: 2000
 
       tts:
-        url: wss://dashscope.aliyuncs.com/api-ws/v1/realtime
         model: qwen3-tts-flash
         api-key: test-api-key
         voice: Cherry
         format: pcm
-        sample-rate: 16000
-        mode: server_commit
+        sample-rate: 24000
+        mode: http
         language-type: Chinese
         speech-rate: 1.0
         volume: 60
 
-    user-utterance-debounce-ms: 1600
-
-    rate-limit:
-      max-per-session: 10
-      max-per-ip: 3
-      max-concurrent: 50
-
-    audio:
-      codec: opus
-      sample-rate: 16000
-      bit-rate: 24000
-      channels: 1
-      chunk-duration: 2000
+    # 与主配置的默认值保持一致；需要更快节奏的用例请用 setter 显式覆盖
+    user-utterance-debounce-ms: 2500

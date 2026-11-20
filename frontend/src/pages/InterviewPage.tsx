@@ -8,6 +8,7 @@ import type {InterviewQuestion, InterviewSession} from '../types/interview';
 import type {Difficulty} from '../components/UnifiedInterviewModal';
 import type {CategoryDTO} from '../api/skill';
 import { CUSTOM_SKILL_ID } from '../hooks/useInterviewConfig';
+import { toErrorMessage } from '../utils/errors';
 
 interface Message {
   type: 'interviewer' | 'user';
@@ -89,7 +90,8 @@ export default function Interview({
 
       initSession(newSession);
     } catch (err) {
-      setError('创建面试失败，请重试');
+      // 透传后端错误信息（如“简历为空”“Provider 不可用”），不再用通用文案覆盖
+      setError(toErrorMessage(err, '创建面试失败，请重试'));
       console.error(err);
     } finally {
       setIsCreating(false);
@@ -110,7 +112,7 @@ export default function Interview({
         setAnswer(currentQ.userAnswer);
       }
     } catch (err) {
-      setError('恢复面试失败，请重试');
+      setError(toErrorMessage(err, '恢复面试失败，请重试'));
       console.error(err);
     } finally {
       setIsCreating(false);
@@ -178,7 +180,7 @@ export default function Interview({
         onInterviewComplete();
       }
     } catch (err) {
-      setError('提交答案失败，请重试');
+      setError(toErrorMessage(err, '提交答案失败，请重试'));
       console.error(err);
     } finally {
       setIsSubmitting(false);
@@ -194,7 +196,7 @@ export default function Interview({
       setShowCompleteConfirm(false);
       onInterviewComplete();
     } catch (err) {
-      setError('提前交卷失败，请重试');
+      setError(toErrorMessage(err, '提前交卷失败，请重试'));
       console.error(err);
     } finally {
       setIsSubmitting(false);

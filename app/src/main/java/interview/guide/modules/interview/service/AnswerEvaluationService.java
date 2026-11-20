@@ -42,7 +42,10 @@ public class AnswerEvaluationService {
     /**
      * 评估完整面试并生成报告
      */
-    public InterviewReportDTO evaluateInterview(ChatClient chatClient, String sessionId, String resumeText,
+    public InterviewReportDTO evaluateInterview(ChatClient chatClient,
+                                                 String sessionId,
+                                                 String skillId,
+                                                 String resumeText,
                                                  List<InterviewQuestionDTO> questions) {
         log.info("开始评估面试: {}, 共{}题", sessionId, questions.size());
 
@@ -53,9 +56,7 @@ public class AnswerEvaluationService {
                 .toList();
 
             String referenceContext = skillService.buildEvaluationReferenceSectionSafe(
-                persistenceService.findBySessionId(sessionId)
-                    .map(s -> s.getSkillId())
-                    .orElse(null)
+                skillId
             );
 
             // 调用通用评估服务

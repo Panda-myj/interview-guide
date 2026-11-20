@@ -12,6 +12,13 @@ dist
 dist-ssr
 *.local
 
+# vite.config.ts 的 tsc 输出已重定向到 node_modules/.tmp；
+# 这些产物若落在项目根会被 Vite 优先加载，导致改 vite.config.ts 静默失效。
+vite.config.js
+vite.config.d.ts
+vite.config.js.timestamp-*
+*.tsbuildinfo
+
 # 包管理器：只保留 pnpm-lock.yaml，禁止提交 npm/yarn 锁文件
 package-lock.json
 yarn.lock

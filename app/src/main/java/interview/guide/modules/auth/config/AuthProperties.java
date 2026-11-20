@@ -71,6 +71,5 @@ public class AuthProperties {
         private String accessKeySecret = "";
         private String signName = "";
         private String loginCodeTemplateCode = "";
-        private String loginAlertTemplateCode = "";
     }
 }

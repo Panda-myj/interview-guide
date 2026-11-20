@@ -116,7 +116,7 @@ java -cp "app/build/classes/java/test;app/build/classes/java/main;<依赖>" \
 前置条件：Docker 可用，`.env` 中配置了可用的 Chat / Embedding Provider。
 
 ```bash
-docker compose up -d postgres redis minio
+docker compose up -d postgres redis rustfs storage-init
 ./gradlew :app:bootRun
 ```
 
@@ -165,7 +165,7 @@ curl -s localhost:8080/actuator/prometheus | grep -E 'rag_(retrieval|rewrite|llm
 
 | 指标 | 结果 | 原因 | 恢复命令 |
 | --- | --- | --- | --- |
-| 答案正确率 | 未执行 | 本机 Docker 未运行，无 PostgreSQL/pgvector；且需要真实付费 Provider | `docker compose up -d postgres redis minio && ./gradlew :app:bootRun` 后按评测集逐条调用 |
+| 答案正确率 | 未执行 | 本机 Docker 未运行，无 PostgreSQL/pgvector；且需要真实付费 Provider | `docker compose up -d postgres redis rustfs storage-init && ./gradlew :app:bootRun` 后按评测集逐条调用 |
 | 引用准确率 | 未执行 | 需真实 LLM 生成带 `[S#]` 的回答 | 同上；观察 `rag_citation_ratio` |
 | 首 token 延迟 | 未执行 | 需真实模型流式响应 | 同上；观察 `rag_llm_first_token_seconds` |
 | 改写成功率 | 未执行 | 需真实 LLM 执行 query rewrite | 同上；观察 `rag_rewrite_total{status}` |

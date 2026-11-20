@@ -2,6 +2,7 @@ package interview.guide.common.aspect;
 
 import interview.guide.common.annotation.RateLimit;
 import interview.guide.common.exception.RateLimitExceededException;
+import interview.guide.modules.auth.service.AuthSupport;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -310,7 +311,7 @@ long result = switch (unit) {
             try {
                 Object phone = argument.getClass().getMethod("phone").invoke(argument);
                 if (phone instanceof String value && !value.isBlank()) {
-                    return sha256(value);
+                    return sha256(normalizePhoneForLimit(value));
                 }
             } catch (ReflectiveOperationException ignored) {
                 // Try the JavaBean accessor used by mutable request objects.
@@ -318,13 +319,22 @@ long result = switch (unit) {
             try {
                 Object phone = argument.getClass().getMethod("getPhone").invoke(argument);
                 if (phone instanceof String value && !value.isBlank()) {
-                    return sha256(value);
+                    return sha256(normalizePhoneForLimit(value));
                 }
             } catch (ReflectiveOperationException ignored) {
                 // This argument is not a phone request object.
             }
         }
         return "unknown";
+    }
+
+    /**
+     * 限流键必须与登录链路使用同一个归一化手机号，否则 +86 前缀/空格/连字符等
+     * 格式变体会生成不同的 hash，从而绕过 PHONE 维度限流。
+     */
+    private String normalizePhoneForLimit(String rawPhone) {
+        String normalized = AuthSupport.normalizePhoneKey(rawPhone);
+        return normalized == null ? rawPhone.trim() : normalized;
     }
 
     private String sha256(String value) {

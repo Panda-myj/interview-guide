@@ -91,6 +91,7 @@ public enum ErrorCode {
     VOICE_CONFIG_READ_FAILED(11009, "读取语音服务配置失败"),
     VOICE_CONFIG_WRITE_FAILED(11010, "写入语音服务配置失败"),
     VOICE_CONFIG_TEST_FAILED(11011, "语音服务连通性测试失败"),
+    PROVIDER_NOT_CONFIGURED(11012, "尚未配置个人大模型服务"),
 
     // ========== 认证与用户模块错误 12xxx ==========
     AUTH_INVALID_PHONE(12001, "请输入正确的手机号"),

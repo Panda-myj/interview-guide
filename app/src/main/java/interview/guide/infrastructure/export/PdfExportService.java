@@ -80,83 +80,79 @@ public class PdfExportService {
      */
     public byte[] exportResumeAnalysis(ResumeEntity resume, ResumeAnalysisResponse analysis) {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        PdfWriter writer = new PdfWriter(baos);
-        PdfDocument pdfDoc = new PdfDocument(writer);
-        Document document = new Document(pdfDoc);
-        
-        // 使用支持中文的字体
-        PdfFont font = createChineseFont();
-        document.setFont(font);
-        
-        // 标题
-        Paragraph title = new Paragraph("简历分析报告")
-            .setFontSize(24)
-            .setBold()
-            .setTextAlignment(TextAlignment.CENTER)
-            .setFontColor(HEADER_COLOR);
-        document.add(title);
-        
-        // 基本信息
-        document.add(new Paragraph("\n"));
-        document.add(createSectionTitle("基本信息"));
-        document.add(new Paragraph("文件名: " + resume.getOriginalFilename()));
-        document.add(new Paragraph("上传时间: " + 
-            (resume.getUploadedAt() != null ? DATE_FORMAT.format(resume.getUploadedAt()) : "未知")));
-        
-        // 总分
-        document.add(new Paragraph("\n"));
-        document.add(createSectionTitle("综合评分"));
-        Paragraph scoreP = new Paragraph("总分: " + analysis.overallScore() + " / 100")
-            .setFontSize(18)
-            .setBold()
-            .setFontColor(getScoreColor(analysis.overallScore()));
-        document.add(scoreP);
-        
-        // 各维度评分
-        if (analysis.scoreDetail() != null) {
+        try (Document document = new Document(new PdfDocument(new PdfWriter(baos)))) {
+            // 使用支持中文的字体
+            PdfFont font = createChineseFont();
+            document.setFont(font);
+
+            // 标题
+            Paragraph title = new Paragraph("简历分析报告")
+                .setFontSize(24)
+                .setBold()
+                .setTextAlignment(TextAlignment.CENTER)
+                .setFontColor(HEADER_COLOR);
+            document.add(title);
+
+            // 基本信息
             document.add(new Paragraph("\n"));
-            document.add(createSectionTitle("各维度评分"));
-            
-            Table scoreTable = new Table(UnitValue.createPercentArray(new float[]{2, 1}))
-                .useAllAvailableWidth();
-            addScoreRow(scoreTable, "项目经验", analysis.scoreDetail().projectScore(), 40);
-            addScoreRow(scoreTable, "技能匹配度", analysis.scoreDetail().skillMatchScore(), 20);
-            addScoreRow(scoreTable, "内容完整性", analysis.scoreDetail().contentScore(), 15);
-            addScoreRow(scoreTable, "结构清晰度", analysis.scoreDetail().structureScore(), 15);
-            addScoreRow(scoreTable, "表达专业性", analysis.scoreDetail().expressionScore(), 10);
-            document.add(scoreTable);
-        }
-        
-        // 简历摘要
-        if (analysis.summary() != null) {
+            document.add(createSectionTitle("基本信息"));
+            document.add(new Paragraph("文件名: " + resume.getOriginalFilename()));
+            document.add(new Paragraph("上传时间: " +
+                (resume.getUploadedAt() != null ? DATE_FORMAT.format(resume.getUploadedAt()) : "未知")));
+
+            // 总分
             document.add(new Paragraph("\n"));
-            document.add(createSectionTitle("简历摘要"));
-            document.add(new Paragraph(sanitizeText(analysis.summary())));
-        }
-        
-        // 优势亮点
-        if (analysis.strengths() != null && !analysis.strengths().isEmpty()) {
-            document.add(new Paragraph("\n"));
-            document.add(createSectionTitle("优势亮点"));
-            for (String strength : analysis.strengths()) {
-                document.add(new Paragraph("• " + sanitizeText(strength)));
-            }
-        }
-        
-        // 改进建议
-        if (analysis.suggestions() != null && !analysis.suggestions().isEmpty()) {
-            document.add(new Paragraph("\n"));
-            document.add(createSectionTitle("改进建议"));
-            for (ResumeAnalysisResponse.Suggestion suggestion : analysis.suggestions()) {
-                document.add(new Paragraph("【" + suggestion.priority() + "】" + sanitizeText(suggestion.category()))
-                    .setBold());
-                document.add(new Paragraph("问题: " + sanitizeText(suggestion.issue())));
-                document.add(new Paragraph("建议: " + sanitizeText(suggestion.recommendation())));
+            document.add(createSectionTitle("综合评分"));
+            Paragraph scoreP = new Paragraph("总分: " + analysis.overallScore() + " / 100")
+                .setFontSize(18)
+                .setBold()
+                .setFontColor(getScoreColor(analysis.overallScore()));
+            document.add(scoreP);
+
+            // 各维度评分
+            if (analysis.scoreDetail() != null) {
                 document.add(new Paragraph("\n"));
+                document.add(createSectionTitle("各维度评分"));
+
+                Table scoreTable = new Table(UnitValue.createPercentArray(new float[]{2, 1}))
+                    .useAllAvailableWidth();
+                addScoreRow(scoreTable, "项目经验", analysis.scoreDetail().projectScore(), 40);
+                addScoreRow(scoreTable, "技能匹配度", analysis.scoreDetail().skillMatchScore(), 20);
+                addScoreRow(scoreTable, "内容完整性", analysis.scoreDetail().contentScore(), 15);
+                addScoreRow(scoreTable, "结构清晰度", analysis.scoreDetail().structureScore(), 15);
+                addScoreRow(scoreTable, "表达专业性", analysis.scoreDetail().expressionScore(), 10);
+                document.add(scoreTable);
+            }
+
+            // 简历摘要
+            if (analysis.summary() != null) {
+                document.add(new Paragraph("\n"));
+                document.add(createSectionTitle("简历摘要"));
+                document.add(new Paragraph(sanitizeText(analysis.summary())));
+            }
+
+            // 优势亮点
+            if (analysis.strengths() != null && !analysis.strengths().isEmpty()) {
+                document.add(new Paragraph("\n"));
+                document.add(createSectionTitle("优势亮点"));
+                for (String strength : analysis.strengths()) {
+                    document.add(new Paragraph("• " + sanitizeText(strength)));
+                }
+            }
+
+            // 改进建议
+            if (analysis.suggestions() != null && !analysis.suggestions().isEmpty()) {
+                document.add(new Paragraph("\n"));
+                document.add(createSectionTitle("改进建议"));
+                for (ResumeAnalysisResponse.Suggestion suggestion : analysis.suggestions()) {
+                    document.add(new Paragraph("【" + suggestion.priority() + "】" + sanitizeText(suggestion.category()))
+                        .setBold());
+                    document.add(new Paragraph("问题: " + sanitizeText(suggestion.issue())));
+                    document.add(new Paragraph("建议: " + sanitizeText(suggestion.recommendation())));
+                    document.add(new Paragraph("\n"));
+                }
             }
         }
-        
-        document.close();
         return baos.toByteArray();
     }
     
@@ -165,13 +161,10 @@ public class PdfExportService {
      */
     public byte[] exportInterviewReport(InterviewSessionEntity session) {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        PdfWriter writer = new PdfWriter(baos);
-        PdfDocument pdfDoc = new PdfDocument(writer);
-        Document document = new Document(pdfDoc);
-        
-        // 使用支持中文的字体
-        PdfFont font = createChineseFont();
-        document.setFont(font);
+        try (Document document = new Document(new PdfDocument(new PdfWriter(baos)))) {
+            // 使用支持中文的字体
+            PdfFont font = createChineseFont();
+            document.setFont(font);
         
         // 标题
         Paragraph title = new Paragraph("模拟面试报告")
@@ -273,8 +266,7 @@ public class PdfExportService {
                 }
             }
         }
-        
-        document.close();
+        }
         return baos.toByteArray();
     }
     

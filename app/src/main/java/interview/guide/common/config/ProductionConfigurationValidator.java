@@ -30,6 +30,14 @@ public class ProductionConfigurationValidator {
     private final LlmProviderProperties providerProperties;
     private final Environment environment;
 
+    private void validateLocalEndpointAccess() {
+        // application-prod.yml 的硬编码 false 可被 OS 环境变量覆盖，这里补一道 fail-fast。
+        if (isTrue("app.ai.security.allow-local-endpoints")) {
+            throw new BusinessException(ErrorCode.CONFIG_INVALID,
+                "APP_AI_ALLOW_LOCAL_ENDPOINTS must be false in production");
+        }
+    }
+
     @PostConstruct
     void validate() {
         if (!environment.acceptsProfiles(Profiles.of("prod"))) {
@@ -53,6 +61,7 @@ public class ProductionConfigurationValidator {
         validateProviderDefaults();
         validateExposureSwitches();
         validateActuatorEndpoints();
+        validateLocalEndpointAccess();
     }
 
     private void validateJwtSecret() {

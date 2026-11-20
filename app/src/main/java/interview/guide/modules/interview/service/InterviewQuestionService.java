@@ -1,6 +1,6 @@
 package interview.guide.modules.interview.service;
 
-import interview.guide.common.ai.LlmProviderRegistry;
+import interview.guide.common.constant.CommonConstants.InterviewDefaults;
 import interview.guide.common.ai.PromptSanitizer;
 import interview.guide.common.ai.PromptSecurityConstants;
 import interview.guide.common.ai.StructuredOutputInvoker;
@@ -13,6 +13,7 @@ import interview.guide.modules.interview.skill.InterviewSkillService;
 import interview.guide.modules.interview.skill.InterviewSkillService.CategoryDTO;
 import interview.guide.modules.interview.skill.InterviewSkillService.SkillDTO;
 import interview.guide.modules.interview.skill.InterviewSkillService.SkillCategoryDTO;
+import interview.guide.modules.llmprovider.service.UserLlmConfigService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -78,7 +79,7 @@ public class InterviewQuestionService {
     private final BeanOutputConverter<QuestionListDTO> outputConverter;
     private final StructuredOutputInvoker structuredOutputInvoker;
     private final InterviewSkillService skillService;
-    private final LlmProviderRegistry llmProviderRegistry;
+    private final UserLlmConfigService userLlmConfigService;
     private final PromptSanitizer promptSanitizer;
     private final ExecutorService questionExecutor;
     private final int followUpCount;
@@ -93,11 +94,11 @@ public class InterviewQuestionService {
             InterviewSkillService skillService,
             InterviewQuestionProperties properties,
             ResourceLoader resourceLoader,
-            LlmProviderRegistry llmProviderRegistry,
+            UserLlmConfigService userLlmConfigService,
             PromptSanitizer promptSanitizer) throws IOException {
         this.structuredOutputInvoker = structuredOutputInvoker;
         this.skillService = skillService;
-        this.llmProviderRegistry = llmProviderRegistry;
+        this.userLlmConfigService = userLlmConfigService;
         this.promptSanitizer = promptSanitizer;
         this.questionExecutor = Executors.newVirtualThreadPerTaskExecutor();
         this.skillSystemPromptTemplate = loadTemplate(resourceLoader, properties.getQuestionSystemPromptPath());
@@ -118,7 +119,6 @@ public class InterviewQuestionService {
     }
 
     public List<InterviewQuestionDTO> generateQuestionsBySkill(
-            String llmProvider,
             String skillId,
             String difficulty,
             String resumeText,
@@ -131,7 +131,10 @@ public class InterviewQuestionService {
         String difficultyDesc = resolveDifficulty(difficulty);
         ChatClient questionChatClient;
         try {
-            questionChatClient = llmProviderRegistry.getPlainChatClient(llmProvider);
+            // 使用当前登录用户自己的大模型配置；未配置时抛 PROVIDER_NOT_CONFIGURED 明确提示
+            questionChatClient = userLlmConfigService.requirePlainChatClientForCurrentUser();
+        } catch (BusinessException e) {
+            throw e;
         } catch (Exception e) {
             log.error("LLM 客户端初始化失败，回退到默认题库: {}", e.getMessage(), e);
             return generateFallbackQuestions(skill, questionCount);
@@ -160,26 +163,18 @@ public class InterviewQuestionService {
                 historicalSection),
             questionExecutor);
 
-        List<InterviewQuestionDTO> resumeQuestions;
-        List<InterviewQuestionDTO> directionQuestions;
+        // 两路并行等待，任一路失败时独立降级为空列表。
+        // 旧实现在简历题失败时会 cancel 方向题并重新整轮生成方向题，导致同一请求内出现
+        // 最多 4 次 LLM 调用（两路各含重试 + 重出一路），是进入面试页面缓慢的主要放大器。
+        // 现在无论哪一路失败都不再取消已在进行中的另一路，也不再额外发起整轮重出。
         try {
-            resumeQuestions = resumeFuture.join();
+            CompletableFuture.allOf(resumeFuture, directionFuture).join();
         } catch (CompletionException e) {
-            log.error("简历题生成失败，降级为全方向题", e.getCause());
-            directionFuture.cancel(true);
-            return generateDirectionOnly(questionChatClient, skill, difficultyDesc, questionCount,
-                historicalSection);
+            log.error("并行出题中发生异常，按批次独立降级: {}", e.getMessage(), e);
         }
 
-        try {
-            directionQuestions = directionFuture.join();
-        } catch (CompletionException e) {
-            log.error("方向题生成失败，降级为全简历题", e.getCause());
-            if (resumeQuestions.isEmpty()) {
-                return generateFallbackQuestions(skill, questionCount);
-            }
-            return resumeQuestions;
-        }
+        List<InterviewQuestionDTO> resumeQuestions = getQuestionsOrEmpty(resumeFuture, "简历题");
+        List<InterviewQuestionDTO> directionQuestions = getQuestionsOrEmpty(directionFuture, "方向题");
 
         if (resumeQuestions.isEmpty() && directionQuestions.isEmpty()) {
             log.warn("简历题和方向题均为空，回退到默认问题");
@@ -190,6 +185,21 @@ public class InterviewQuestionService {
         log.info("并行出题成功: 简历题={}, 方向题={}, 合计={}",
             resumeQuestions.size(), directionQuestions.size(), merged.size());
         return merged;
+    }
+
+    /**
+     * 读取单批出题结果；该批失败时降级为空列表，不影响另一批，
+     * 避免为了补齐失败的一批而重新整轮调用 LLM。
+     */
+    private List<InterviewQuestionDTO> getQuestionsOrEmpty(
+            CompletableFuture<List<InterviewQuestionDTO>> future, String batchName) {
+        try {
+            List<InterviewQuestionDTO> questions = future.join();
+            return questions == null ? List.of() : questions;
+        } catch (CompletionException e) {
+            log.error("{}生成失败，该批降级为空列表: {}", batchName, e.getMessage());
+            return List.of();
+        }
     }
 
     private List<InterviewQuestionDTO> generateResumeQuestions(
@@ -414,8 +424,12 @@ public class InterviewQuestionService {
             String type = hq.type() != null && !hq.type().isBlank() ? hq.type() : DEFAULT_QUESTION_TYPE;
             String summary = hq.topicSummary();
             if (summary == null || summary.isBlank()) {
-                String q = hq.question();
+                // 历史数据中 question 可能为 null，统一回退到默认摘要
+                String q = hq.question() == null ? "" : hq.question();
                 summary = q.length() > 30 ? q.substring(0, 30) + "…" : q;
+                if (summary.isBlank()) {
+                    summary = DEFAULT_QUESTION_TYPE;
+                }
             }
             grouped.computeIfAbsent(type, k -> new ArrayList<>()).add(summary);
         }

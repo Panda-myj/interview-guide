@@ -247,6 +247,73 @@ class VoiceInterviewServiceStateMachineTest {
         }
     }
 
+    @Nested
+    @DisplayName("超时会话清理")
+    class StaleSessionCleanup {
+
+        @Test
+        @DisplayName("清理超时会话时同步入队评估，与断连/孤儿对账链路一致")
+        void staleSessionCleanupShouldEnqueueEvaluation() {
+            VoiceInterviewSessionEntity session = session(VoiceInterviewSessionStatus.IN_PROGRESS);
+            when(sessionRepository.findByStatusAndStartTimeBefore(
+                eq(VoiceInterviewSessionStatus.IN_PROGRESS), any(LocalDateTime.class)))
+                .thenReturn(List.of(session));
+            when(sessionRepository.findByEvaluateStatusAndUpdatedAtBefore(
+                any(AsyncTaskStatus.class), any(LocalDateTime.class)))
+                .thenReturn(List.of());
+            when(sessionRepository.findById(1L)).thenReturn(Optional.of(session));
+            when(sessionRepository.updateStatusConditionally(
+                eq(1L), eq(VoiceInterviewSessionStatus.COMPLETED), anyList())).thenReturn(1);
+            when(sessionRepository.initializeEvaluateStatus(
+                eq(1L), eq(AsyncTaskStatus.PENDING), any())).thenReturn(1);
+
+            int cleaned = service.cleanupStaleSessions();
+
+            assertThat(cleaned).isEqualTo(1);
+            verify(producer, times(1)).sendEvaluateTask("1");
+        }
+
+        @Test
+        @DisplayName("会话已被并发结束时不重复入队评估")
+        void alreadyEndedSessionShouldNotEnqueueEvaluation() {
+            VoiceInterviewSessionEntity session = session(VoiceInterviewSessionStatus.IN_PROGRESS);
+            when(sessionRepository.findByStatusAndStartTimeBefore(
+                eq(VoiceInterviewSessionStatus.IN_PROGRESS), any(LocalDateTime.class)))
+                .thenReturn(List.of(session));
+            when(sessionRepository.findByEvaluateStatusAndUpdatedAtBefore(
+                any(AsyncTaskStatus.class), any(LocalDateTime.class)))
+                .thenReturn(List.of());
+            when(sessionRepository.findById(1L)).thenReturn(Optional.of(session));
+            // 条件更新失败：状态已被其它路径迁移为 COMPLETED
+            when(sessionRepository.updateStatusConditionally(
+                eq(1L), eq(VoiceInterviewSessionStatus.COMPLETED), anyList())).thenReturn(0);
+
+            service.cleanupStaleSessions();
+
+            verify(producer, never()).sendEvaluateTask(anyString());
+        }
+
+        @Test
+        @DisplayName("卡住的 PROCESSING 评估被重置为 FAILED")
+        void stuckProcessingEvaluationShouldBeReset() {
+            VoiceInterviewSessionEntity stuck = session(VoiceInterviewSessionStatus.COMPLETED);
+            when(sessionRepository.findByStatusAndStartTimeBefore(
+                eq(VoiceInterviewSessionStatus.IN_PROGRESS), any(LocalDateTime.class)))
+                .thenReturn(List.of());
+            when(sessionRepository.findByEvaluateStatusAndUpdatedAtBefore(
+                eq(AsyncTaskStatus.PROCESSING), any(LocalDateTime.class)))
+                .thenReturn(List.of(stuck));
+            when(sessionRepository.updateEvaluateStatusConditionally(
+                eq(1L), eq(AsyncTaskStatus.FAILED), anyList(), anyString())).thenReturn(1);
+
+            int cleaned = service.cleanupStaleSessions();
+
+            assertThat(cleaned).isEqualTo(1);
+            verify(sessionRepository).updateEvaluateStatusConditionally(
+                eq(1L), eq(AsyncTaskStatus.FAILED), anyList(), anyString());
+        }
+    }
+
     private VoiceInterviewSessionEntity session(VoiceInterviewSessionStatus status) {
         return VoiceInterviewSessionEntity.builder()
             .id(1L)
